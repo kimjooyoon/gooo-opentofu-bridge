@@ -32,7 +32,7 @@ jobs:
           set -euo pipefail
           rm -rf "$WORK_DIR" "$PUBLISH_DIR" "$EVIDENCE_DIR"
           mkdir -p "$WORK_DIR/gooo/bin" "$WORK_DIR/tofu/bin" "$WORK_DIR/cases" "$PUBLISH_DIR" "$EVIDENCE_DIR"
-          lock=contracts/release-lock-v1.json
+          lock="$GITHUB_WORKSPACE/contracts/release-lock-v1.json"
           jq -e '
             .schema=="gooo/opentofu-bridge/release-lock/v1" and
             .authority.repository_writes==0 and
@@ -92,8 +92,9 @@ jobs:
           verify_release "$tofu_repo" "$tofu_tag" "$(jq -r '.opentofu.release_id' "$lock")" "$(jq -r '.opentofu.target_commit_sha' "$lock")" false "$WORK_DIR/tofu-release.json"
           download_asset "$tofu_repo" "$WORK_DIR/tofu-release.json" "$(jq -r '.opentofu.asset.id' "$lock")" "$(jq -r '.opentofu.asset.name' "$lock")" "$(jq -r '.opentofu.asset.size' "$lock")" "$(jq -r '.opentofu.asset.sha256' "$lock")" "$WORK_DIR/tofu/tofu.zip"
           download_asset "$tofu_repo" "$WORK_DIR/tofu-release.json" "$(jq -r '.opentofu.checksums.id' "$lock")" "$(jq -r '.opentofu.checksums.name' "$lock")" "$(jq -r '.opentofu.checksums.size' "$lock")" "$(jq -r '.opentofu.checksums.sha256' "$lock")" "$WORK_DIR/tofu/SHA256SUMS"
-          cp "$WORK_DIR/tofu/tofu.zip" "$WORK_DIR/tofu/$(jq -r '.opentofu.asset.name' "$lock")"
-          (cd "$WORK_DIR/tofu" && awk -v name="$(jq -r '.opentofu.asset.name' "$lock")" '$2==name {print}' SHA256SUMS | sha256sum -c -)
+          tofu_asset_name=$(jq -r '.opentofu.asset.name' "$lock")
+          cp "$WORK_DIR/tofu/tofu.zip" "$WORK_DIR/tofu/$tofu_asset_name"
+          (cd "$WORK_DIR/tofu" && awk -v name="$tofu_asset_name" '$2==name {print}' SHA256SUMS | sha256sum -c -)
           unzip -q "$WORK_DIR/tofu/tofu.zip" -d "$WORK_DIR/tofu/bin"
           tofu=$(find "$WORK_DIR/tofu/bin" -type f -name tofu -print -quit)
           test -n "$tofu"
