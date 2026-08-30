@@ -138,6 +138,18 @@ jobs:
           fi
           jq -e '.verified==true and .activity_count==10 and .binding_edges==12' "$WORK_DIR/meta-bindings.json" >/dev/null
 
+      - name: Preserve binding diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: bridge-binding-diagnostics-${{ github.run_id }}
+          path: |
+            ${{ env.WORK_DIR }}/graph.json
+            ${{ env.WORK_DIR }}/gooo-graph.stderr
+            ${{ env.WORK_DIR }}/bridge-bind.stderr
+          if-no-files-found: ignore
+          retention-days: 1
+
       - name: Generate deterministic artifact and human dossier
         shell: bash
         run: |
