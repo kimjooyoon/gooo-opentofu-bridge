@@ -119,6 +119,10 @@ jobs:
           gooo_status=$?
           set -e
           if [ "$gooo_status" -ne 0 ]; then
+            echo "released Gooo graph command diagnostics" >&2
+            ls -l "$gooo" "$WORK_DIR/graph.json" "$WORK_DIR/gooo-graph.stderr" >&2 || true
+            wc -c "$WORK_DIR/graph.json" "$WORK_DIR/gooo-graph.stderr" >&2 || true
+            head -c 1000 "$WORK_DIR/graph.json" >&2 || true
             cat "$WORK_DIR/gooo-graph.stderr" >&2
             exit "$gooo_status"
           fi
