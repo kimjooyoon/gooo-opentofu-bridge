@@ -1,0 +1,19 @@
+{
+  "schema": "gooo/opentofu-bridge/denominator/v1",
+  "version": 1,
+  "target_cells": 10,
+  "expected_output_files": ["dossier.md", "intent.tf.json"],
+  "expected_user_path_steps": 4,
+  "cells": [
+    {"ordinal": 1, "id": "INTENT_DECLARED", "activity": "DeclareGoooInfrastructureIntent", "stage": "INPUT", "step": "DECLARE_GOOO_INFRASTRUCTURE_INTENT", "closed_reason": "GOOO_INFRASTRUCTURE_INTENT_DECLARED", "depends_on": []},
+    {"ordinal": 2, "id": "GOOO_GRAPH_BOUND", "activity": "BindGoooIntentToOpenTofu", "stage": "META", "step": "BIND_RELEASED_GOOO_GRAPH", "closed_reason": "RELEASED_GOOO_GRAPH_BOUND", "depends_on": ["INTENT_DECLARED"]},
+    {"ordinal": 3, "id": "OPENTOFU_SPEC_INPUT", "activity": "ConsumePinnedOpenTofuJSONSpec", "stage": "SPEC", "step": "CONSUME_IMMUTABLE_OPENTOFU_JSON_SPEC", "closed_reason": "PINNED_OPENTOFU_JSON_SPEC_CONSUMED", "depends_on": ["GOOO_GRAPH_BOUND"]},
+    {"ordinal": 4, "id": "ARTIFACT_GENERATED", "activity": "GenerateOpenTofuCompatibleArtifact", "stage": "GENERATION", "step": "GENERATE_DETERMINISTIC_TF_JSON", "closed_reason": "DETERMINISTIC_OPENTOFU_ARTIFACT_GENERATED", "depends_on": ["OPENTOFU_SPEC_INPUT"]},
+    {"ordinal": 5, "id": "DOSSIER_GENERATED", "activity": "GenerateHumanDossier", "stage": "GENERATION", "step": "GENERATE_HUMAN_DOSSIER", "closed_reason": "HUMAN_DOSSIER_GENERATED", "depends_on": ["ARTIFACT_GENERATED"]},
+    {"ordinal": 6, "id": "OUTPUTS_VERIFIED", "activity": "VerifyGeneratedOutputs", "stage": "VALIDATION", "step": "VERIFY_GENERATED_OUTPUTS", "closed_reason": "GENERATED_OUTPUTS_STRUCTURALLY_VERIFIED", "depends_on": ["DOSSIER_GENERATED"]},
+    {"ordinal": 7, "id": "UNKNOWN_CASE_PRESERVED", "activity": "PreserveUnknownCase", "stage": "UNKNOWN", "step": "PRESERVE_MISSING_SPEC_UNKNOWN", "closed_reason": "UNKNOWN_COORDINATES_PRESERVED", "depends_on": ["OUTPUTS_VERIFIED"]},
+    {"ordinal": 8, "id": "REFUTED_CASE_CLASSIFIED", "activity": "RefuteContradictionCase", "stage": "REFUTATION", "step": "REFUTE_INTENT_ARTIFACT_CONTRADICTION", "closed_reason": "REFUTED_PRECEDENCE_APPLIED", "depends_on": ["OUTPUTS_VERIFIED"]},
+    {"ordinal": 9, "id": "REPLAY_VERIFIED", "activity": "VerifyDeterministicReplay", "stage": "REPLAY", "step": "VERIFY_DETERMINISTIC_REPLAY", "closed_reason": "DETERMINISTIC_REPLAY_VERIFIED", "depends_on": ["OUTPUTS_VERIFIED"]},
+    {"ordinal": 10, "id": "READ_ONLY_BOUNDARY", "activity": "PreserveReadOnlyBoundary", "stage": "AUTHORITY", "step": "PRESERVE_READ_ONLY_BOUNDARY", "closed_reason": "READ_ONLY_BOUNDARY_PRESERVED", "depends_on": ["UNKNOWN_CASE_PRESERVED", "REFUTED_CASE_CLASSIFIED", "REPLAY_VERIFIED"]}
+  ]
+}

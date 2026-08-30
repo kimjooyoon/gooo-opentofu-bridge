@@ -1,0 +1,25 @@
+package opentofubridge
+namespace opentofubridge
+
+entity InfrastructureIntent id "bridge://opentofu/intent/hello"
+entity TerraformDataIntent id "bridge://opentofu/intent/hello/terraform-data"
+entity OpenTofuSpecBinding id "bridge://opentofu/intent/hello/spec-binding"
+entity OpenTofuJSONSpecReceipt id "bridge://opentofu/intent/hello/spec-receipt"
+entity OpenTofuArtifact id "bridge://opentofu/intent/hello/artifact"
+entity HumanDossier id "bridge://opentofu/intent/hello/dossier"
+entity NormalVerification id "bridge://opentofu/intent/hello/normal-verification"
+entity UnknownCase id "bridge://opentofu/intent/hello/unknown"
+entity RefutedCase id "bridge://opentofu/intent/hello/refuted"
+entity ReplayVerification id "bridge://opentofu/intent/hello/replay"
+entity ReadOnlyObservation id "bridge://opentofu/intent/hello/read-only"
+
+activity DeclareGoooInfrastructureIntent(InfrastructureIntent) -> TerraformDataIntent
+activity BindGoooIntentToOpenTofu(TerraformDataIntent) -> OpenTofuSpecBinding
+activity ConsumePinnedOpenTofuJSONSpec(OpenTofuSpecBinding) -> OpenTofuJSONSpecReceipt
+activity GenerateOpenTofuCompatibleArtifact(OpenTofuJSONSpecReceipt) -> OpenTofuArtifact
+activity GenerateHumanDossier(OpenTofuArtifact) -> HumanDossier
+activity VerifyGeneratedOutputs(HumanDossier) -> NormalVerification
+activity PreserveUnknownCase(NormalVerification) -> UnknownCase
+activity RefuteContradictionCase(NormalVerification) -> RefutedCase
+activity VerifyDeterministicReplay(NormalVerification) -> ReplayVerification
+activity PreserveReadOnlyBoundary(UnknownCase, RefutedCase, ReplayVerification) -> ReadOnlyObservation
