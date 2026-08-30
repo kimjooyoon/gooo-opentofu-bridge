@@ -1,0 +1,21 @@
+{
+  "schema": "gooo/opentofu-bridge/plan-oracle/v1",
+  "subject": "bridge://opentofu/intent/hello",
+  "resource_actions": [
+    {
+      "address": "terraform_data.hello",
+      "action": "create"
+    }
+  ],
+  "change_summary": {
+    "add": 1,
+    "change": 0,
+    "remove": 0
+  },
+  "side_effects": {
+    "apply": 0,
+    "cloud": 0,
+    "network": 0,
+    "source_write": 0
+  }
+}

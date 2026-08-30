@@ -60,7 +60,7 @@
     "opentofu_build_executions": 0,
     "opentofu_init_executions": 0,
     "opentofu_validate_executions": 1,
-    "opentofu_plan_executions": 0,
+    "opentofu_plan_executions": 1,
     "opentofu_apply_executions": 0,
     "opentofu_test_executions": 0,
     "opentofu_provider_accesses": 0,
