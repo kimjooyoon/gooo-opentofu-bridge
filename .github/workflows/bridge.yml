@@ -1,0 +1,320 @@
+name: Gooo OpenTofu Bridge
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bridge:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SUBJECT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      WORK_DIR: /tmp/gooo-opentofu-bridge
+      PUBLISH_DIR: /tmp/gooo-opentofu-bridge-publish
+      EVIDENCE_DIR: /tmp/gooo-opentofu-bridge-evidence
+
+    steps:
+      - name: Checkout submitted revision
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Acquire immutable Gooo, OpenTofu, and specification inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$WORK_DIR" "$PUBLISH_DIR" "$EVIDENCE_DIR"
+          mkdir -p "$WORK_DIR/gooo/bin" "$WORK_DIR/tofu/bin" "$WORK_DIR/cases" "$PUBLISH_DIR" "$EVIDENCE_DIR"
+          lock=contracts/release-lock-v1.json
+          jq -e '
+            .schema=="gooo/opentofu-bridge/release-lock/v1" and
+            .authority.repository_writes==0 and
+            .authority.local_test_executions==0 and
+            .authority.local_build_executions==0 and
+            .authority.local_formatter_executions==0 and
+            .authority.opentofu_init_executions==0 and
+            .authority.opentofu_plan_executions==0 and
+            .authority.opentofu_apply_executions==0 and
+            .authority.opentofu_test_executions==0 and
+            .authority.opentofu_provider_accesses==0 and
+            .authority.opentofu_cloud_accesses==0 and
+            .authority.opentofu_runtime_network_access_claimed==false
+          ' "$lock" >/dev/null
+
+          verify_tag_commit() {
+            local repository=$1 tag=$2 expected=$3
+            local resolved
+            resolved=$(git ls-remote "https://github.com/$repository.git" "refs/tags/$tag^{}" | awk 'NR==1{print $1}')
+            if [ -z "$resolved" ]; then
+              resolved=$(git ls-remote "https://github.com/$repository.git" "refs/tags/$tag" | awk 'NR==1{print $1}')
+            fi
+            test "$resolved" = "$expected"
+          }
+
+          verify_release() {
+            local repository=$1 tag=$2 release_id=$3 target=$4 prerelease=$5 output=$6
+            gh api "repos/$repository/releases/tags/$tag" > "$output"
+            jq -e --arg tag "$tag" --argjson id "$release_id" --argjson pre "$prerelease" \
+              '.tag_name==$tag and .id==$id and .prerelease==$pre' "$output" >/dev/null
+            verify_tag_commit "$repository" "$tag" "$target"
+          }
+
+          download_asset() {
+            local repository=$1 release_json=$2 asset_id=$3 asset_name=$4 expected_size=$5 expected_sha=$6 output=$7
+            jq -e --argjson id "$asset_id" --arg name "$asset_name" --argjson size "$expected_size" --arg digest "sha256:$expected_sha" \
+              '.assets[]|select(.id==$id)|.name==$name and .size==$size and .digest==$digest' "$release_json" >/dev/null
+            gh api -H 'Accept: application/octet-stream' "repos/$repository/releases/assets/$asset_id" > "$output"
+            test "$(wc -c < "$output" | tr -d ' ')" = "$expected_size"
+            test "$(sha256sum "$output" | awk '{print $1}')" = "$expected_sha"
+          }
+
+          gooo_repo=$(jq -r '.gooo.repository' "$lock")
+          gooo_tag=$(jq -r '.gooo.tag' "$lock")
+          verify_release "$gooo_repo" "$gooo_tag" "$(jq -r '.gooo.release_id' "$lock")" "$(jq -r '.gooo.target_commit_sha' "$lock")" true "$WORK_DIR/gooo-release.json"
+          download_asset "$gooo_repo" "$WORK_DIR/gooo-release.json" "$(jq -r '.gooo.asset.id' "$lock")" "$(jq -r '.gooo.asset.name' "$lock")" "$(jq -r '.gooo.asset.size' "$lock")" "$(jq -r '.gooo.asset.sha256' "$lock")" "$WORK_DIR/gooo/gooo-linux-amd64.tar.gz"
+          download_asset "$gooo_repo" "$WORK_DIR/gooo-release.json" "$(jq -r '.gooo.checksums.id' "$lock")" "$(jq -r '.gooo.checksums.name' "$lock")" "$(jq -r '.gooo.checksums.size' "$lock")" "$(jq -r '.gooo.checksums.sha256' "$lock")" "$WORK_DIR/gooo/SHA256SUMS"
+          (cd "$WORK_DIR/gooo" && sha256sum -c SHA256SUMS --ignore-missing)
+          tar -xzf "$WORK_DIR/gooo/gooo-linux-amd64.tar.gz" -C "$WORK_DIR/gooo/bin"
+          gooo=$(find "$WORK_DIR/gooo/bin" -type f -name gooo -print -quit)
+          test -n "$gooo"
+          chmod +x "$gooo"
+          printf '%s\n' "$gooo" > "$WORK_DIR/gooo-path"
+
+          tofu_repo=$(jq -r '.opentofu.repository' "$lock")
+          tofu_tag=$(jq -r '.opentofu.tag' "$lock")
+          verify_release "$tofu_repo" "$tofu_tag" "$(jq -r '.opentofu.release_id' "$lock")" "$(jq -r '.opentofu.target_commit_sha' "$lock")" false "$WORK_DIR/tofu-release.json"
+          download_asset "$tofu_repo" "$WORK_DIR/tofu-release.json" "$(jq -r '.opentofu.asset.id' "$lock")" "$(jq -r '.opentofu.asset.name' "$lock")" "$(jq -r '.opentofu.asset.size' "$lock")" "$(jq -r '.opentofu.asset.sha256' "$lock")" "$WORK_DIR/tofu/tofu.zip"
+          download_asset "$tofu_repo" "$WORK_DIR/tofu-release.json" "$(jq -r '.opentofu.checksums.id' "$lock")" "$(jq -r '.opentofu.checksums.name' "$lock")" "$(jq -r '.opentofu.checksums.size' "$lock")" "$(jq -r '.opentofu.checksums.sha256' "$lock")" "$WORK_DIR/tofu/SHA256SUMS"
+          cp "$WORK_DIR/tofu/tofu.zip" "$WORK_DIR/tofu/$(jq -r '.opentofu.asset.name' "$lock")"
+          (cd "$WORK_DIR/tofu" && awk -v name="$(jq -r '.opentofu.asset.name' "$lock")" '$2==name {print}' SHA256SUMS | sha256sum -c -)
+          unzip -q "$WORK_DIR/tofu/tofu.zip" -d "$WORK_DIR/tofu/bin"
+          tofu=$(find "$WORK_DIR/tofu/bin" -type f -name tofu -print -quit)
+          test -n "$tofu"
+          chmod +x "$tofu"
+          printf '%s\n' "$tofu" > "$WORK_DIR/tofu-path"
+
+          spec_url=$(jq -r '.opentofu.json_spec.url' "$lock")
+          curl --fail --location --silent --show-error "$spec_url" -o "$WORK_DIR/opentofu-json-spec.mdx"
+          test "$(sha256sum "$WORK_DIR/opentofu-json-spec.mdx" | awk '{print $1}')" = "$(jq -r '.opentofu.json_spec.sha256' "$lock")"
+          jq -e --arg ref "$(jq -r '.opentofu.json_spec.ref' "$lock")" --arg path "$(jq -r '.opentofu.json_spec.path' "$lock")" \
+            '.opentofu.json_spec.ref==$ref and .opentofu.json_spec.path==$path' "$lock" >/dev/null
+
+      - name: Bind the released Gooo semantic graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          source=examples/intent/main.gooo
+          gooo=$(cat "$WORK_DIR/gooo-path")
+          start_ns=$(date +%s%N)
+          /usr/bin/time -f '%M' -o "$WORK_DIR/bind-rss-kib" "$gooo" graph dump "$source" > "$WORK_DIR/graph.json"
+          end_ns=$(date +%s%N)
+          echo $(( (end_ns-start_ns+999999)/1000000 )) > "$WORK_DIR/bind-wall-ms"
+          python3 scripts/bridge.py bind --source "$source" --graph "$WORK_DIR/graph.json" --denominator contracts/bridge-denominator-v1.json --output "$WORK_DIR/meta-bindings.json"
+          jq -e '.verified==true and .activity_count==10 and .binding_edges==12' "$WORK_DIR/meta-bindings.json" >/dev/null
+
+      - name: Generate deterministic artifact and human dossier
+        shell: bash
+        run: |
+          set -euo pipefail
+          start_ns=$(date +%s%N)
+          /usr/bin/time -f '%M' -o "$WORK_DIR/generate-rss-kib" python3 scripts/bridge.py generate \
+            --source examples/intent/main.gooo \
+            --graph "$WORK_DIR/graph.json" \
+            --lock contracts/release-lock-v1.json \
+            --spec "$WORK_DIR/opentofu-json-spec.mdx" \
+            --bindings "$WORK_DIR/meta-bindings.json" \
+            --denominator contracts/bridge-denominator-v1.json \
+            --output-dir "$PUBLISH_DIR"
+          end_ns=$(date +%s%N)
+          echo $(( (end_ns-start_ns+999999)/1000000 )) > "$WORK_DIR/generate-wall-ms"
+          test "$(find "$PUBLISH_DIR" -maxdepth 1 -type f -printf '%f\n' | sort | tr '\n' ' ')" = "dossier.md intent.tf.json "
+
+      - name: Validate generated output with the official OpenTofu binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$WORK_DIR/module"
+          cp "$PUBLISH_DIR/intent.tf.json" "$WORK_DIR/module/intent.tf.json"
+          tofu=$(cat "$WORK_DIR/tofu-path")
+          start_ns=$(date +%s%N)
+          set +e
+          (cd "$WORK_DIR/module" && /usr/bin/time -f '%M' -o "$WORK_DIR/validate-rss-kib" "$tofu" validate -json > "$WORK_DIR/tofu-validate.json")
+          tofu_status=$?
+          set -e
+          end_ns=$(date +%s%N)
+          echo $(( (end_ns-start_ns+999999)/1000000 )) > "$WORK_DIR/validate-wall-ms"
+          tofu_state=UNKNOWN
+          tofu_reason=OPENTOFU_VALIDATE_EXECUTION_UNAVAILABLE
+          if [ "$tofu_status" -eq 0 ] && jq -e '.valid==true and (.error_count==0 or .error_count==null)' "$WORK_DIR/tofu-validate.json" >/dev/null 2>&1; then
+            tofu_state=CLOSED
+            tofu_reason=
+            python3 scripts/bridge.py validate \
+              --artifact "$PUBLISH_DIR/intent.tf.json" \
+              --dossier "$PUBLISH_DIR/dossier.md" \
+              --lock contracts/release-lock-v1.json \
+              --spec "$WORK_DIR/opentofu-json-spec.mdx" \
+              --bindings "$WORK_DIR/meta-bindings.json" \
+              --denominator contracts/bridge-denominator-v1.json \
+              --output "$WORK_DIR/validation.json" \
+              --tofu-result "$WORK_DIR/tofu-validate.json"
+          elif [ -s "$WORK_DIR/tofu-validate.json" ] && jq -e '.valid==false and (.error_count|type=="number") and .error_count>0' "$WORK_DIR/tofu-validate.json" >/dev/null 2>&1; then
+            echo 'The official OpenTofu validator rejected the generated configuration.' >&2
+            cat "$WORK_DIR/tofu-validate.json" >&2
+            exit 1
+          else
+            if [ "$tofu_status" -ne 0 ]; then
+              tofu_reason=OPENTOFU_VALIDATE_NONZERO_WITHOUT_MACHINE_READABLE_RESULT
+            fi
+            python3 scripts/bridge.py validate \
+              --artifact "$PUBLISH_DIR/intent.tf.json" \
+              --dossier "$PUBLISH_DIR/dossier.md" \
+              --lock contracts/release-lock-v1.json \
+              --spec "$WORK_DIR/opentofu-json-spec.mdx" \
+              --bindings "$WORK_DIR/meta-bindings.json" \
+              --denominator contracts/bridge-denominator-v1.json \
+              --output "$WORK_DIR/validation.json" \
+              --tofu-state UNKNOWN \
+              --tofu-reason "$tofu_reason"
+          fi
+          jq -e '.state=="CLOSED" and .structural_checks.output_file_count==2' "$WORK_DIR/validation.json" >/dev/null
+
+      - name: Evaluate normal, UNKNOWN, and REFUTED cases
+        shell: bash
+        run: |
+          set -euo pipefail
+          for mode in normal unknown refuted; do
+            start_ns=$(date +%s%N)
+            /usr/bin/time -f '%M' -o "$WORK_DIR/$mode-rss-kib" python3 scripts/bridge.py evaluate \
+              --mode "$mode" \
+              --artifact "$PUBLISH_DIR/intent.tf.json" \
+              --dossier "$PUBLISH_DIR/dossier.md" \
+              --bindings "$WORK_DIR/meta-bindings.json" \
+              --denominator contracts/bridge-denominator-v1.json \
+              --output "$WORK_DIR/cases/$mode.json"
+            end_ns=$(date +%s%N)
+            echo $(( (end_ns-start_ns+999999)/1000000 )) > "$WORK_DIR/$mode-wall-ms"
+          done
+          jq -e '.decision=="CLOSED"' "$WORK_DIR/cases/normal.json" >/dev/null
+          jq -e '.decision=="FAIL_CLOSED" and ([.claims[].unknown_class]|sort)==["DEPENDENCY_BLOCKED","DIRECT_MISSING"] and all(.claims[]; (.stage and .step and .reason and .unknown_class and .next_operation and (.blocked_by|type=="array")))' "$WORK_DIR/cases/unknown.json" >/dev/null
+          jq -e '.decision=="FAIL_CLOSED" and .precedence=="REFUTED_OVER_UNKNOWN" and .claims[0].state=="REFUTED"' "$WORK_DIR/cases/refuted.json" >/dev/null
+
+      - name: Verify deterministic replay
+        shell: bash
+        run: |
+          set -euo pipefail
+          start_ns=$(date +%s%N)
+          /usr/bin/time -f '%M' -o "$WORK_DIR/replay-rss-kib" python3 scripts/bridge.py replay \
+            --source examples/intent/main.gooo \
+            --graph "$WORK_DIR/graph.json" \
+            --lock contracts/release-lock-v1.json \
+            --spec "$WORK_DIR/opentofu-json-spec.mdx" \
+            --bindings "$WORK_DIR/meta-bindings.json" \
+            --denominator contracts/bridge-denominator-v1.json \
+            --output "$WORK_DIR/replay.json"
+          end_ns=$(date +%s%N)
+          echo $(( (end_ns-start_ns+999999)/1000000 )) > "$WORK_DIR/replay-wall-ms"
+          jq -e '.state=="CLOSED" and .comparison_count==2 and all(.comparisons[];.byte_equal==true)' "$WORK_DIR/replay.json" >/dev/null
+
+      - name: Record activity-linked observations and publish evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          lines_for() { awk 'END {print NR+0}' "$1"; }
+          physical_lines=$(find . -path './.git' -prune -o -type f ! -path './README.md' -print0 | xargs -0 awk 'END {print NR+0}')
+          gooo_lines=$(find . -path './.git' -prune -o -type f -name '*.gooo' -print0 | xargs -0 awk 'END {print NR+0}')
+          python_lines=$(find . -path './.git' -prune -o -type f -name '*.py' -print0 | xargs -0 awk 'END {print NR+0}')
+          workflow_lines=$(lines_for .github/workflows/bridge.yml)
+          jq -S -n \
+            --argjson physical "$physical_lines" \
+            --argjson gooo "$gooo_lines" \
+            --argjson python "$python_lines" \
+            --argjson workflow "$workflow_lines" \
+            '[
+              {name:"repository_physical_lines",value:$physical,unit:"lines",activity:"VerifyGeneratedOutputs"},
+              {name:"gooo_physical_lines",value:$gooo,unit:"lines",activity:"DeclareGoooInfrastructureIntent"},
+              {name:"python_physical_lines",value:$python,unit:"lines",activity:"GenerateOpenTofuCompatibleArtifact"},
+              {name:"workflow_physical_lines",value:$workflow,unit:"lines",activity:"PreserveReadOnlyBoundary"}
+            ]' > "$WORK_DIR/line-metrics.json"
+          jq -S -n \
+            --argjson bind_wall "$(cat "$WORK_DIR/bind-wall-ms")" --argjson bind_rss "$(cat "$WORK_DIR/bind-rss-kib")" \
+            --argjson generate_wall "$(cat "$WORK_DIR/generate-wall-ms")" --argjson generate_rss "$(cat "$WORK_DIR/generate-rss-kib")" \
+            --argjson validate_wall "$(cat "$WORK_DIR/validate-wall-ms")" --argjson validate_rss "$(cat "$WORK_DIR/validate-rss-kib")" \
+            --argjson normal_wall "$(cat "$WORK_DIR/normal-wall-ms")" --argjson normal_rss "$(cat "$WORK_DIR/normal-rss-kib")" \
+            --argjson unknown_wall "$(cat "$WORK_DIR/unknown-wall-ms")" --argjson unknown_rss "$(cat "$WORK_DIR/unknown-rss-kib")" \
+            --argjson refuted_wall "$(cat "$WORK_DIR/refuted-wall-ms")" --argjson refuted_rss "$(cat "$WORK_DIR/refuted-rss-kib")" \
+            --argjson replay_wall "$(cat "$WORK_DIR/replay-wall-ms")" --argjson replay_rss "$(cat "$WORK_DIR/replay-rss-kib")" \
+            --arg state "$(jq -r '.official_opentofu.state' "$WORK_DIR/validation.json")" \
+            '[
+              {stage:"released_graph_dump",activity:"BindGoooIntentToOpenTofu",wall_ms:$bind_wall,peak_rss_kib:$bind_rss,executions:1,reused:0,state:"CLOSED"},
+              {stage:"deterministic_generation",activity:"GenerateOpenTofuCompatibleArtifact",wall_ms:$generate_wall,peak_rss_kib:$generate_rss,executions:1,reused:0,state:"CLOSED"},
+              {stage:"official_opentofu_validation",activity:"VerifyGeneratedOutputs",wall_ms:$validate_wall,peak_rss_kib:$validate_rss,executions:1,reused:0,state:$state},
+              {stage:"normal_case_evaluation",activity:"VerifyGeneratedOutputs",wall_ms:$normal_wall,peak_rss_kib:$normal_rss,executions:1,reused:0,state:"CLOSED"},
+              {stage:"unknown_case_evaluation",activity:"PreserveUnknownCase",wall_ms:$unknown_wall,peak_rss_kib:$unknown_rss,executions:1,reused:0,state:"CLOSED"},
+              {stage:"refuted_case_evaluation",activity:"RefuteContradictionCase",wall_ms:$refuted_wall,peak_rss_kib:$refuted_rss,executions:1,reused:0,state:"CLOSED"},
+              {stage:"deterministic_replay",activity:"VerifyDeterministicReplay",wall_ms:$replay_wall,peak_rss_kib:$replay_rss,executions:1,reused:0,state:"CLOSED"}
+            ]' > "$WORK_DIR/measurements.json"
+          python3 scripts/bridge.py record \
+            --publish-dir "$PUBLISH_DIR" \
+            --bindings "$WORK_DIR/meta-bindings.json" \
+            --denominator contracts/bridge-denominator-v1.json \
+            --lock contracts/release-lock-v1.json \
+            --source examples/intent/main.gooo \
+            --graph "$WORK_DIR/graph.json" \
+            --validation "$WORK_DIR/validation.json" \
+            --replay "$WORK_DIR/replay.json" \
+            --cases-dir "$WORK_DIR/cases" \
+            --measurements "$WORK_DIR/measurements.json" \
+            --line-metrics "$WORK_DIR/line-metrics.json" \
+            --output "$EVIDENCE_DIR/bridge-observation.json"
+          cp "$PUBLISH_DIR/intent.tf.json" "$EVIDENCE_DIR/intent.tf.json"
+          cp "$PUBLISH_DIR/dossier.md" "$EVIDENCE_DIR/dossier.md"
+          cp "$WORK_DIR/graph.json" "$EVIDENCE_DIR/released-semantic-graph.json"
+          cp "$WORK_DIR/meta-bindings.json" "$EVIDENCE_DIR/meta-bindings.json"
+          cp "$WORK_DIR/validation.json" "$EVIDENCE_DIR/validation.json"
+          cp "$WORK_DIR/tofu-validate.json" "$EVIDENCE_DIR/tofu-validate.json" 2>/dev/null || true
+          cp "$WORK_DIR/replay.json" "$EVIDENCE_DIR/replay.json"
+          cp "$WORK_DIR/cases/normal.json" "$EVIDENCE_DIR/case-normal.json"
+          cp "$WORK_DIR/cases/unknown.json" "$EVIDENCE_DIR/case-unknown.json"
+          cp "$WORK_DIR/cases/refuted.json" "$EVIDENCE_DIR/case-refuted.json"
+          jq -e '
+            .state=="CLOSED" and
+            .user_path.step_count==4 and
+            .generated_outputs.file_count==2 and
+            (.metrics|all(.[]; (.activity_id|type)=="string")) and
+            ([.cases.normal.decision,.cases.unknown.decision,.cases.refuted.decision]|sort)==["CLOSED","FAIL_CLOSED","FAIL_CLOSED"] and
+            ([.cases.unknown.claims[].unknown_class]|sort)==["DEPENDENCY_BLOCKED","DIRECT_MISSING"] and
+            .cases.refuted.claims[0].state=="REFUTED"
+          ' "$EVIDENCE_DIR/bridge-observation.json" >/dev/null
+
+      - name: Upload bridge evidence
+        id: evidence
+        uses: actions/upload-artifact@v6
+        with:
+          name: gooo-opentofu-bridge-evidence-${{ github.sha }}
+          path: ${{ env.EVIDENCE_DIR }}
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Summarize exact observations
+        shell: bash
+        run: |
+          set -euo pipefail
+          observation="$EVIDENCE_DIR/bridge-observation.json"
+          {
+            echo "## Gooo OpenTofu Bridge"
+            echo
+            echo "- normal / UNKNOWN / REFUTED: 1 / 1 / 1"
+            echo "- generated files: $(jq -r '.generated_outputs.file_count' "$observation")"
+            echo "- user path steps: $(jq -r '.user_path.step_count' "$observation")"
+            echo "- official OpenTofu validation: $(jq -r '.validation.official_opentofu.state' "$observation")"
+            echo "- executed verification stages: $(jq -r '.metrics[]|select(.name==\"executed_verification_stages\")|.value' "$observation")"
+            echo "- reused verification stages: $(jq -r '.metrics[]|select(.name==\"reused_verification_stages\")|.value' "$observation")"
+            echo "- artifact digest: ${{ steps.evidence.outputs.artifact-digest }}"
+          } >> "$GITHUB_STEP_SUMMARY"

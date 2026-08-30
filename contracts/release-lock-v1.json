@@ -1,0 +1,73 @@
+{
+  "schema": "gooo/opentofu-bridge/release-lock/v1",
+  "gooo": {
+    "repository": "kimjooyoon/meta-ontology-go",
+    "tag": "v0.4.0-dev",
+    "release_id": 378565653,
+    "target_commit_sha": "57ac9ec486bbca69e447a8eba94e0ce3cd03ced0",
+    "prerelease": true,
+    "asset": {
+      "id": 533959499,
+      "name": "gooo-linux-amd64.tar.gz",
+      "size": 7057764,
+      "sha256": "3f6f34156dc959c4ae80711ff55cfbd135023fd57df673d28247e1894bf42f48"
+    },
+    "checksums": {
+      "id": 533959512,
+      "name": "SHA256SUMS",
+      "size": 270,
+      "sha256": "58f6882f9dc056af40e3892fbf8c4a702ff7123c2c7ff4fd4d1c26350297fe12"
+    }
+  },
+  "opentofu": {
+    "repository": "opentofu/opentofu",
+    "tag": "v1.12.6",
+    "release_id": 372998315,
+    "tag_object_sha": "4d19e94790ab5f0446b4364a8cef03c365f14e10",
+    "target_commit_sha": "b4305e5a5dd2fb79a27897ae30784a181d3a26cb",
+    "published_at": "2026-08-19T11:40:07Z",
+    "prerelease": false,
+    "iac_engine": "OPENTOFU",
+    "iac_engine_version": "1.12.6",
+    "platform": "linux_amd64",
+    "asset": {
+      "id": 520762796,
+      "name": "tofu_1.12.6_linux_amd64.zip",
+      "size": 34644365,
+      "sha256": "5dc43da4f750f33873dc25e94587128709e819e544b7be9016b255316153c3a8"
+    },
+    "checksums": {
+      "id": 520762938,
+      "name": "tofu_1.12.6_SHA256SUMS",
+      "size": 3730,
+      "sha256": "6988e0cb8f4e9ebfa3b0999e44841549741b22d9b38873cb5b89074f1cddcb1c"
+    },
+    "json_spec": {
+      "repository": "opentofu/opentofu",
+      "ref": "b4305e5a5dd2fb79a27897ae30784a181d3a26cb",
+      "path": "website/docs/language/syntax/json.mdx",
+      "url": "https://raw.githubusercontent.com/opentofu/opentofu/b4305e5a5dd2fb79a27897ae30784a181d3a26cb/website/docs/language/syntax/json.mdx",
+      "github_blob_sha": "9de9d949a25910dfce4af433995935a5241f857e",
+      "sha256": "dcb4d8d6dee9879fe6a55a5e22a359c2b4a2c9a2df9849d3a269c9690f1cd123"
+    }
+  },
+  "authority": {
+    "repository_writes": 0,
+    "local_test_executions": 0,
+    "local_build_executions": 0,
+    "local_formatter_executions": 0,
+    "opentofu_source_checkouts": 0,
+    "opentofu_build_executions": 0,
+    "opentofu_init_executions": 0,
+    "opentofu_validate_executions": 1,
+    "opentofu_plan_executions": 0,
+    "opentofu_apply_executions": 0,
+    "opentofu_test_executions": 0,
+    "opentofu_provider_accesses": 0,
+    "opentofu_cloud_accesses": 0,
+    "opentofu_runtime_network_access_claimed": false,
+    "opentofu_runtime_network_access_observed": null,
+    "product_generation_authorized": false,
+    "deployment_execution_authorized": false
+  }
+}
