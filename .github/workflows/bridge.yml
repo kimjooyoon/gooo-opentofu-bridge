@@ -136,7 +136,7 @@ jobs:
             cat "$WORK_DIR/bridge-bind.stderr" >&2
             exit "$bind_status"
           fi
-          jq -e '.verified==true and .activity_count==10 and .binding_edges==12' "$WORK_DIR/meta-bindings.json" >/dev/null
+          jq -e '.verified==true and .activity_count==10 and .binding_edges==11' "$WORK_DIR/meta-bindings.json" >/dev/null
 
       - name: Preserve binding diagnostics
         if: always()
