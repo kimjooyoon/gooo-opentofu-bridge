@@ -10,7 +10,8 @@
   "change_summary": {
     "add": 1,
     "change": 0,
-    "remove": 0
+    "remove": 0,
+    "operation": "plan"
   },
   "side_effects": {
     "apply": 0,
