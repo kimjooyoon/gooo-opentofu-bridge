@@ -228,7 +228,7 @@ def load_plan_oracle(path: Path) -> dict[str, Any]:
         if not isinstance(action, dict) or set(action) != {"address", "action"} or action["action"] not in PLAN_ACTIONS:
             die("plan oracle action is invalid")
         normalized.append({"address": action["address"], "action": action["action"]})
-    if oracle.get("change_summary") != {"add": 1, "change": 0, "remove": 0, "operation": "plan"}:
+    if oracle.get("change_summary") != {"add": 1, "change": 0, "forget": 0, "import": 0, "operation": "plan", "remove": 0}:
         die("plan oracle summary is not fixed")
     if oracle.get("side_effects") != {"apply": 0, "cloud": 0, "network": 0, "source_write": 0}:
         die("plan oracle side-effect contract is not zero")
