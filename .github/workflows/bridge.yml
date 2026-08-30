@@ -128,7 +128,14 @@ jobs:
           fi
           end_ns=$(date +%s%N)
           echo $(( (end_ns-start_ns+999999)/1000000 )) > "$WORK_DIR/bind-wall-ms"
-          python3 scripts/bridge.py bind --source "$source" --graph "$WORK_DIR/graph.json" --denominator contracts/bridge-denominator-v1.json --output "$WORK_DIR/meta-bindings.json"
+          set +e
+          python3 scripts/bridge.py bind --source "$source" --graph "$WORK_DIR/graph.json" --denominator contracts/bridge-denominator-v1.json --output "$WORK_DIR/meta-bindings.json" 2> "$WORK_DIR/bridge-bind.stderr"
+          bind_status=$?
+          set -e
+          if [ "$bind_status" -ne 0 ]; then
+            cat "$WORK_DIR/bridge-bind.stderr" >&2
+            exit "$bind_status"
+          fi
           jq -e '.verified==true and .activity_count==10 and .binding_edges==12' "$WORK_DIR/meta-bindings.json" >/dev/null
 
       - name: Generate deterministic artifact and human dossier
