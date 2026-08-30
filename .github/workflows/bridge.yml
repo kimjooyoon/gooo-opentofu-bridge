@@ -296,10 +296,14 @@ jobs:
           regular_files=$(find . -path './.git' -prune -o -type f ! -path './README.md' -print | awk 'END {print NR+0}')
           go_files=$(find . -path './.git' -prune -o -type f -name '*.go' -print | awk 'END {print NR+0}')
           go_lines=$(find . -path './.git' -prune -o -type f -name '*.go' -print0 | xargs -0 awk 'END {print NR+0}')
+          go_lines=${go_lines:-0}
           gooo_files=$(find . -path './.git' -prune -o -type f -name '*.gooo' -print | awk 'END {print NR+0}')
           physical_lines=$(find . -path './.git' -prune -o -type f ! -path './README.md' -print0 | xargs -0 awk 'END {print NR+0}')
+          physical_lines=${physical_lines:-0}
           gooo_lines=$(find . -path './.git' -prune -o -type f -name '*.gooo' -print0 | xargs -0 awk 'END {print NR+0}')
+          gooo_lines=${gooo_lines:-0}
           python_lines=$(find . -path './.git' -prune -o -type f -name '*.py' -print0 | xargs -0 awk 'END {print NR+0}')
+          python_lines=${python_lines:-0}
           workflow_lines=$(lines_for .github/workflows/bridge.yml)
           jq -S -n \
             --argjson dirs "$descendant_dirs" \
