@@ -114,7 +114,14 @@ jobs:
           source=examples/intent/main.gooo
           gooo=$(cat "$WORK_DIR/gooo-path")
           start_ns=$(date +%s%N)
-          /usr/bin/time -f '%M' -o "$WORK_DIR/bind-rss-kib" "$gooo" graph dump "$source" > "$WORK_DIR/graph.json"
+          set +e
+          /usr/bin/time -f '%M' -o "$WORK_DIR/bind-rss-kib" "$gooo" graph dump "$source" > "$WORK_DIR/graph.json" 2> "$WORK_DIR/gooo-graph.stderr"
+          gooo_status=$?
+          set -e
+          if [ "$gooo_status" -ne 0 ]; then
+            cat "$WORK_DIR/gooo-graph.stderr" >&2
+            exit "$gooo_status"
+          fi
           end_ns=$(date +%s%N)
           echo $(( (end_ns-start_ns+999999)/1000000 )) > "$WORK_DIR/bind-wall-ms"
           python3 scripts/bridge.py bind --source "$source" --graph "$WORK_DIR/graph.json" --denominator contracts/bridge-denominator-v1.json --output "$WORK_DIR/meta-bindings.json"
