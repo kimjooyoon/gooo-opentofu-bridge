@@ -240,6 +240,12 @@ jobs:
           match_end_ns=$(date +%s%N)
           echo $(( (match_end_ns-match_start_ns+999999)/1000000 )) > "$WORK_DIR/match-wall-ms"
           printf '%s\n' "$(cat "$WORK_DIR/plan-rss-kib")" > "$WORK_DIR/match-rss-kib"
+          echo '--- plan receipt ---'
+          jq . "$WORK_DIR/plan-receipt.json"
+          echo '--- plan match ---'
+          jq . "$WORK_DIR/plan-match.json"
+          echo '--- raw plan JSONL ---'
+          sed -n '1,40p' "$WORK_DIR/tofu-plan.jsonl"
           jq -e '.state=="CLOSED" and .iac_engine=="OPENTOFU" and .engine_identity_source=="PINNED_RELEASE_LOCK" and .exit_code==2 and .drift_count==0 and (.resource_actions|sort_by(.address,.action))==[{"address":"terraform_data.hello","action":"create"}]' "$WORK_DIR/plan-receipt.json" >/dev/null
           jq -e '.state=="CLOSED" and .claim.state=="CLOSED" and .expected_resource_actions==[{"address":"terraform_data.hello","action":"create"}] and .observed_resource_actions==[{"address":"terraform_data.hello","action":"create"}]' "$WORK_DIR/plan-match.json" >/dev/null
 
