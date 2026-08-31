@@ -1229,6 +1229,15 @@ def parser() -> argparse.ArgumentParser:
     for name in ("artifact", "plan-receipt", "oracle", "output"):
         plan_match.add_argument(f"--{name}", type=Path, required=True)
 
+    plan_receipt = sub.add_parser("plan-receipt")
+    for name in ("plan-ui", "version-json", "binary", "artifact", "oracle", "lock", "output"):
+        plan_receipt.add_argument(f"--{name}", type=Path, required=True)
+    plan_receipt.add_argument("--exit-code", type=int, required=True)
+
+    plan_match = sub.add_parser("match-plan")
+    for name in ("artifact", "plan-receipt", "oracle", "output"):
+        plan_match.add_argument(f"--{name}", type=Path, required=True)
+
     evaluate = sub.add_parser("evaluate")
     evaluate.add_argument("--mode", choices=("normal", "unknown", "refuted"), required=True)
     for name in ("artifact", "dossier", "plan-match", "bindings", "denominator", "output"):
