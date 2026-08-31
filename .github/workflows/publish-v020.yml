@@ -23,7 +23,7 @@ jobs:
       VERSION_TAG: v0.2.0
       TRIGGER_TAG: release-v0.2.0-publish-1
       MAIN_SHA: 5444c1f9967ee42af05bf06094473e2950f6a366
-      TRIGGER_SHA: 563a7c9082d0e5ac46a783dfdbc9eae51a55d63a
+      TRIGGER_SHA: ${{ github.sha }}
       SOURCE_RUN_ID: '33345178464'
       ARTIFACT_ID: '9741768051'
       ARTIFACT_NAME: gooo-opentofu-bridge-evidence-5444c1f9967ee42af05bf06094473e2950f6a366
