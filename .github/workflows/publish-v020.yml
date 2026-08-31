@@ -78,9 +78,8 @@ jobs:
 
           locate_artifact() {
             local name=$1
-            local path
-            path=$(find "$WORK_DIR/artifact" -type f -name "$name" -print -quit)
-            test -n "$path"
+            local path="$WORK_DIR/artifact/$name"
+            test -f "$path"
             printf '%s' "$path"
           }
 
