@@ -40,7 +40,7 @@ jobs:
             .authority.local_build_executions==0 and
             .authority.local_formatter_executions==0 and
             .authority.opentofu_init_executions==0 and
-            .authority.opentofu_plan_executions==0 and
+            .authority.opentofu_plan_executions==1 and
             .authority.opentofu_apply_executions==0 and
             .authority.opentofu_test_executions==0 and
             .authority.opentofu_provider_accesses==0 and
@@ -136,7 +136,7 @@ jobs:
             cat "$WORK_DIR/bridge-bind.stderr" >&2
             exit "$bind_status"
           fi
-          jq -e '.verified==true and .activity_count==10 and .binding_edges==11' "$WORK_DIR/meta-bindings.json" >/dev/null
+          jq -e '.verified==true and .activity_count==12 and .binding_edges==14' "$WORK_DIR/meta-bindings.json" >/dev/null
 
       - name: Generate deterministic artifact and human dossier
         shell: bash
@@ -204,6 +204,48 @@ jobs:
           fi
           jq -e '.state=="CLOSED" and .structural_checks.output_file_count==2' "$WORK_DIR/validation.json" >/dev/null
 
+      - name: Capture pinned OpenTofu version and read-only plan receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          tofu=$(cat "$WORK_DIR/tofu-path")
+          set +e
+          "$tofu" version -json > "$WORK_DIR/tofu-version.json"
+          version_status=$?
+          set -e
+          test "$version_status" -eq 0
+          start_ns=$(date +%s%N)
+          set +e
+          (cd "$WORK_DIR/module" && /usr/bin/time -f '%M' -o "$WORK_DIR/plan-rss-kib" "$tofu" plan -refresh=false -input=false -json -detailed-exitcode > "$WORK_DIR/tofu-plan.jsonl")
+          plan_status=$?
+          set -e
+          end_ns=$(date +%s%N)
+          echo $(( (end_ns-start_ns+999999)/1000000 )) > "$WORK_DIR/plan-wall-ms"
+          test "$plan_status" -eq 0 -o "$plan_status" -eq 2
+          plan_rss_kib=$(tail -n 1 "$WORK_DIR/plan-rss-kib")
+          printf '%s\n' "$plan_rss_kib" > "$WORK_DIR/plan-rss-kib"
+          test "$plan_rss_kib" -ge 0
+          match_start_ns=$(date +%s%N)
+          python3 scripts/bridge.py plan-receipt \
+            --plan-ui "$WORK_DIR/tofu-plan.jsonl" \
+            --version-json "$WORK_DIR/tofu-version.json" \
+            --binary "$tofu" \
+            --artifact "$PUBLISH_DIR/intent.tf.json" \
+            --oracle fixtures/plan-oracle-v1.json \
+            --lock contracts/release-lock-v1.json \
+            --exit-code "$plan_status" \
+            --output "$WORK_DIR/plan-receipt.json"
+          python3 scripts/bridge.py match-plan \
+            --artifact "$PUBLISH_DIR/intent.tf.json" \
+            --plan-receipt "$WORK_DIR/plan-receipt.json" \
+            --oracle fixtures/plan-oracle-v1.json \
+            --output "$WORK_DIR/plan-match.json"
+          match_end_ns=$(date +%s%N)
+          echo $(( (match_end_ns-match_start_ns+999999)/1000000 )) > "$WORK_DIR/match-wall-ms"
+          printf '%s\n' "$(cat "$WORK_DIR/plan-rss-kib")" > "$WORK_DIR/match-rss-kib"
+          jq -e '.state=="CLOSED" and .iac_engine=="OPENTOFU" and .engine_identity_source=="PINNED_RELEASE_LOCK" and .exit_code==2 and .drift_count==0 and (.resource_actions|sort_by(.address,.action))==[{"address":"terraform_data.hello","action":"create"}]' "$WORK_DIR/plan-receipt.json" >/dev/null
+          jq -e '.state=="CLOSED" and .claim.state=="CLOSED" and .expected_resource_actions==[{"address":"terraform_data.hello","action":"create"}] and .observed_resource_actions==[{"address":"terraform_data.hello","action":"create"}]' "$WORK_DIR/plan-match.json" >/dev/null
+
       - name: Evaluate normal, UNKNOWN, and REFUTED cases
         shell: bash
         run: |
@@ -214,6 +256,7 @@ jobs:
               --mode "$mode" \
               --artifact "$PUBLISH_DIR/intent.tf.json" \
               --dossier "$PUBLISH_DIR/dossier.md" \
+              --plan-match "$WORK_DIR/plan-match.json" \
               --bindings "$WORK_DIR/meta-bindings.json" \
               --denominator contracts/bridge-denominator-v1.json \
               --output "$WORK_DIR/cases/$mode.json"
@@ -221,8 +264,8 @@ jobs:
             echo $(( (end_ns-start_ns+999999)/1000000 )) > "$WORK_DIR/$mode-wall-ms"
           done
           jq -e '.decision=="CLOSED"' "$WORK_DIR/cases/normal.json" >/dev/null
-          jq -e '.decision=="FAIL_CLOSED" and ([.claims[].unknown_class]|sort)==["DEPENDENCY_BLOCKED","DIRECT_MISSING"] and all(.claims[]; (.stage and .step and .reason and .unknown_class and .next_operation and (.blocked_by|type=="array")))' "$WORK_DIR/cases/unknown.json" >/dev/null
-          jq -e '.decision=="FAIL_CLOSED" and .precedence=="REFUTED_OVER_UNKNOWN" and .claims[0].state=="REFUTED"' "$WORK_DIR/cases/refuted.json" >/dev/null
+          jq -e '.decision=="FAIL_CLOSED" and ([.claims[].unknown_class]|sort)==["DIRECT_MISSING","DIRECT_MISSING","OBSERVATION_UNAVAILABLE"] and all(.claims[]; (.stage and .step and .reason and .unknown_class and .next_operation and (.blocked_by|type=="array")))' "$WORK_DIR/cases/unknown.json" >/dev/null
+          jq -e '.decision=="FAIL_CLOSED" and .precedence=="REFUTED_OVER_UNKNOWN" and all(.claims[];.state=="REFUTED")' "$WORK_DIR/cases/refuted.json" >/dev/null
 
       - name: Verify deterministic replay
         shell: bash
@@ -246,16 +289,35 @@ jobs:
         run: |
           set -euo pipefail
           lines_for() { awk 'END {print NR+0}' "$1"; }
+          descendant_dirs=$(find . -mindepth 1 -path './.git' -prune -o -type d -print | awk 'END {print NR+0}')
+          regular_files=$(find . -path './.git' -prune -o -type f ! -path './README.md' -print | awk 'END {print NR+0}')
+          go_files=$(find . -path './.git' -prune -o -type f -name '*.go' -print | awk 'END {print NR+0}')
+          go_lines=$(find . -path './.git' -prune -o -type f -name '*.go' -print0 | xargs -0 awk 'END {print NR+0}')
+          go_lines=${go_lines:-0}
+          gooo_files=$(find . -path './.git' -prune -o -type f -name '*.gooo' -print | awk 'END {print NR+0}')
           physical_lines=$(find . -path './.git' -prune -o -type f ! -path './README.md' -print0 | xargs -0 awk 'END {print NR+0}')
+          physical_lines=${physical_lines:-0}
           gooo_lines=$(find . -path './.git' -prune -o -type f -name '*.gooo' -print0 | xargs -0 awk 'END {print NR+0}')
+          gooo_lines=${gooo_lines:-0}
           python_lines=$(find . -path './.git' -prune -o -type f -name '*.py' -print0 | xargs -0 awk 'END {print NR+0}')
+          python_lines=${python_lines:-0}
           workflow_lines=$(lines_for .github/workflows/bridge.yml)
           jq -S -n \
+            --argjson dirs "$descendant_dirs" \
+            --argjson files "$regular_files" \
+            --argjson go_files "$go_files" \
+            --argjson go_lines "$go_lines" \
+            --argjson gooo_files "$gooo_files" \
             --argjson physical "$physical_lines" \
             --argjson gooo "$gooo_lines" \
             --argjson python "$python_lines" \
             --argjson workflow "$workflow_lines" \
             '[
+              {name:"descendant_directories",value:$dirs,unit:"directories",activity:"PreserveReadOnlyBoundary"},
+              {name:"regular_files_excluding_root_readme",value:$files,unit:"files",activity:"VerifyGeneratedOutputs"},
+              {name:"go_physical_files",value:$go_files,unit:"files",activity:"GenerateOpenTofuCompatibleArtifact"},
+              {name:"go_physical_lines",value:$go_lines,unit:"lines",activity:"GenerateOpenTofuCompatibleArtifact"},
+              {name:"gooo_physical_files",value:$gooo_files,unit:"files",activity:"DeclareGoooInfrastructureIntent"},
               {name:"repository_physical_lines",value:$physical,unit:"lines",activity:"VerifyGeneratedOutputs"},
               {name:"gooo_physical_lines",value:$gooo,unit:"lines",activity:"DeclareGoooInfrastructureIntent"},
               {name:"python_physical_lines",value:$python,unit:"lines",activity:"GenerateOpenTofuCompatibleArtifact"},
@@ -265,20 +327,28 @@ jobs:
             --argjson bind_wall "$(cat "$WORK_DIR/bind-wall-ms")" --argjson bind_rss "$(cat "$WORK_DIR/bind-rss-kib")" \
             --argjson generate_wall "$(cat "$WORK_DIR/generate-wall-ms")" --argjson generate_rss "$(cat "$WORK_DIR/generate-rss-kib")" \
             --argjson validate_wall "$(cat "$WORK_DIR/validate-wall-ms")" --argjson validate_rss "$(cat "$WORK_DIR/validate-rss-kib")" \
+            --argjson plan_wall "$(cat "$WORK_DIR/plan-wall-ms")" --argjson plan_rss "$(cat "$WORK_DIR/plan-rss-kib")" \
+            --argjson match_wall "$(cat "$WORK_DIR/match-wall-ms")" --argjson match_rss "$(cat "$WORK_DIR/match-rss-kib")" \
             --argjson normal_wall "$(cat "$WORK_DIR/normal-wall-ms")" --argjson normal_rss "$(cat "$WORK_DIR/normal-rss-kib")" \
             --argjson unknown_wall "$(cat "$WORK_DIR/unknown-wall-ms")" --argjson unknown_rss "$(cat "$WORK_DIR/unknown-rss-kib")" \
             --argjson refuted_wall "$(cat "$WORK_DIR/refuted-wall-ms")" --argjson refuted_rss "$(cat "$WORK_DIR/refuted-rss-kib")" \
             --argjson replay_wall "$(cat "$WORK_DIR/replay-wall-ms")" --argjson replay_rss "$(cat "$WORK_DIR/replay-rss-kib")" \
             --arg state "$(jq -r '.official_opentofu.state' "$WORK_DIR/validation.json")" \
             '[
-              {stage:"released_graph_dump",activity:"BindGoooIntentToOpenTofu",wall_ms:$bind_wall,peak_rss_kib:$bind_rss,executions:1,reused:0,state:"CLOSED"},
-              {stage:"deterministic_generation",activity:"GenerateOpenTofuCompatibleArtifact",wall_ms:$generate_wall,peak_rss_kib:$generate_rss,executions:1,reused:0,state:"CLOSED"},
-              {stage:"official_opentofu_validation",activity:"VerifyGeneratedOutputs",wall_ms:$validate_wall,peak_rss_kib:$validate_rss,executions:1,reused:0,state:$state},
-              {stage:"normal_case_evaluation",activity:"VerifyGeneratedOutputs",wall_ms:$normal_wall,peak_rss_kib:$normal_rss,executions:1,reused:0,state:"CLOSED"},
-              {stage:"unknown_case_evaluation",activity:"PreserveUnknownCase",wall_ms:$unknown_wall,peak_rss_kib:$unknown_rss,executions:1,reused:0,state:"CLOSED"},
-              {stage:"refuted_case_evaluation",activity:"RefuteContradictionCase",wall_ms:$refuted_wall,peak_rss_kib:$refuted_rss,executions:1,reused:0,state:"CLOSED"},
-              {stage:"deterministic_replay",activity:"VerifyDeterministicReplay",wall_ms:$replay_wall,peak_rss_kib:$replay_rss,executions:1,reused:0,state:"CLOSED"}
+              {stage:"released_graph_dump",activity:"BindGoooIntentToOpenTofu",wall_ms:$bind_wall,peak_rss_kib:$bind_rss,executions:1,reused:0,state:"CLOSED",execution_state:"EXECUTED",count:1},
+              {stage:"deterministic_generation",activity:"GenerateOpenTofuCompatibleArtifact",wall_ms:$generate_wall,peak_rss_kib:$generate_rss,executions:1,reused:0,state:"CLOSED",execution_state:"EXECUTED",count:1},
+              {stage:"official_opentofu_validation",activity:"VerifyGeneratedOutputs",wall_ms:$validate_wall,peak_rss_kib:$validate_rss,executions:1,reused:0,state:$state,execution_state:"EXECUTED",count:1},
+              {stage:"pinned_opentofu_plan",activity:"GenerateOpenTofuPlanReceipt",wall_ms:$plan_wall,peak_rss_kib:$plan_rss,executions:1,reused:0,state:"CLOSED",execution_state:"EXECUTED",count:1},
+              {stage:"resource_action_match",activity:"MatchGoooIntentToOpenTofuPlan",wall_ms:$match_wall,peak_rss_kib:$match_rss,executions:1,reused:0,state:"CLOSED",execution_state:"EXECUTED",count:1},
+              {stage:"normal_case_evaluation",activity:"VerifyGeneratedOutputs",wall_ms:$normal_wall,peak_rss_kib:$normal_rss,executions:1,reused:0,state:"CLOSED",execution_state:"EXECUTED",count:1},
+              {stage:"unknown_case_evaluation",activity:"PreserveUnknownCase",wall_ms:$unknown_wall,peak_rss_kib:$unknown_rss,executions:1,reused:0,state:"CLOSED",execution_state:"EXECUTED",count:1},
+              {stage:"refuted_case_evaluation",activity:"RefuteContradictionCase",wall_ms:$refuted_wall,peak_rss_kib:$refuted_rss,executions:1,reused:0,state:"CLOSED",execution_state:"EXECUTED",count:1},
+              {stage:"deterministic_replay",activity:"VerifyDeterministicReplay",wall_ms:$replay_wall,peak_rss_kib:$replay_rss,executions:1,reused:0,state:"CLOSED",execution_state:"EXECUTED",count:1},
+              {stage:"build",activity:"GenerateOpenTofuCompatibleArtifact",wall_ms:($bind_wall+$generate_wall),peak_rss_kib:($bind_rss|if $generate_rss > . then $generate_rss else . end),executions:2,reused:0,state:"CLOSED",execution_state:"EXECUTED",count:2},
+              {stage:"test",activity:"PreserveReadOnlyBoundary",wall_ms:($normal_wall+$unknown_wall+$refuted_wall),peak_rss_kib:([$normal_rss,$unknown_rss,$refuted_rss]|max),executions:3,reused:0,state:"CLOSED",execution_state:"EXECUTED",count:3,executed_test_count:3,reused_test_evidence_count:0,skipped_test_count:0},
+              {stage:"conformance",activity:"MatchGoooIntentToOpenTofuPlan",wall_ms:($validate_wall+$plan_wall+$match_wall+$replay_wall),peak_rss_kib:([$validate_rss,$plan_rss,$match_rss,$replay_rss]|max),executions:4,reused:0,state:"CLOSED",execution_state:"EXECUTED",count:4}
             ]' > "$WORK_DIR/measurements.json"
+          test -z "$(git status --porcelain)"
           python3 scripts/bridge.py record \
             --publish-dir "$PUBLISH_DIR" \
             --bindings "$WORK_DIR/meta-bindings.json" \
@@ -288,6 +358,10 @@ jobs:
             --graph "$WORK_DIR/graph.json" \
             --validation "$WORK_DIR/validation.json" \
             --replay "$WORK_DIR/replay.json" \
+            --plan-receipt "$WORK_DIR/plan-receipt.json" \
+            --plan-match "$WORK_DIR/plan-match.json" \
+            --oracle fixtures/plan-oracle-v1.json \
+            --version-json "$WORK_DIR/tofu-version.json" \
             --cases-dir "$WORK_DIR/cases" \
             --measurements "$WORK_DIR/measurements.json" \
             --line-metrics "$WORK_DIR/line-metrics.json" \
@@ -298,18 +372,27 @@ jobs:
           cp "$WORK_DIR/meta-bindings.json" "$EVIDENCE_DIR/meta-bindings.json"
           cp "$WORK_DIR/validation.json" "$EVIDENCE_DIR/validation.json"
           cp "$WORK_DIR/tofu-validate.json" "$EVIDENCE_DIR/tofu-validate.json" 2>/dev/null || true
+          cp "$WORK_DIR/tofu-version.json" "$EVIDENCE_DIR/tofu-version.json"
+          cp "$WORK_DIR/tofu-plan.jsonl" "$EVIDENCE_DIR/tofu-plan.jsonl"
+          cp "$WORK_DIR/plan-receipt.json" "$EVIDENCE_DIR/plan-receipt.json"
+          cp "$WORK_DIR/plan-match.json" "$EVIDENCE_DIR/plan-match.json"
+          cp fixtures/plan-oracle-v1.json "$EVIDENCE_DIR/plan-oracle-v1.json"
           cp "$WORK_DIR/replay.json" "$EVIDENCE_DIR/replay.json"
           cp "$WORK_DIR/cases/normal.json" "$EVIDENCE_DIR/case-normal.json"
           cp "$WORK_DIR/cases/unknown.json" "$EVIDENCE_DIR/case-unknown.json"
           cp "$WORK_DIR/cases/refuted.json" "$EVIDENCE_DIR/case-refuted.json"
           jq -e '
             .state=="CLOSED" and
-            .user_path.step_count==4 and
+            .user_path.step_count==5 and
             .generated_outputs.file_count==2 and
             (.metrics|all(.[]; (.activity_id|type)=="string")) and
             ([.cases.normal.decision,.cases.unknown.decision,.cases.refuted.decision]|sort)==["CLOSED","FAIL_CLOSED","FAIL_CLOSED"] and
-            ([.cases.unknown.claims[].unknown_class]|sort)==["DEPENDENCY_BLOCKED","DIRECT_MISSING"] and
-            .cases.refuted.claims[0].state=="REFUTED"
+            ([.cases.unknown.claims[].unknown_class]|sort)==["DIRECT_MISSING","DIRECT_MISSING","OBSERVATION_UNAVAILABLE"] and
+            all(.cases.refuted.claims[];.state=="REFUTED") and
+            .plan_match.state=="CLOSED" and
+            .plan_receipt.iac_engine=="OPENTOFU" and
+            .plan_receipt.exit_code==2 and
+            (.metrics|any(.[];.name=="repository_writes" and .value==0))
           ' "$EVIDENCE_DIR/bridge-observation.json" >/dev/null
 
       - name: Upload bridge evidence
@@ -330,10 +413,14 @@ jobs:
             echo "## Gooo OpenTofu Bridge"
             echo
             echo "- normal / UNKNOWN / REFUTED: 1 / 1 / 1"
-            echo "- generated files: $(jq -r '.generated_outputs.file_count' "$observation")"
+            echo "- generated files / bytes: $(jq -r '.generated_outputs.file_count' "$observation") / $(jq -r '.generated_outputs.bytes' "$observation")"
             echo "- user path steps: $(jq -r '.user_path.step_count' "$observation")"
             echo "- official OpenTofu validation: $(jq -r '.validation.official_opentofu.state' "$observation")"
-            echo "- executed verification stages: $(jq -r '.metrics[]|select(.name==\"executed_verification_stages\")|.value' "$observation")"
-            echo "- reused verification stages: $(jq -r '.metrics[]|select(.name==\"reused_verification_stages\")|.value' "$observation")"
+            echo "- OpenTofu plan: $(jq -r '.plan_receipt.iac_engine + " " + .plan_receipt.engine_version + ", exit_code=" + (.plan_receipt.exit_code|tostring) + ", resource_actions=" + (.plan_match.resource_action_count|tostring)' "$observation")"
+            echo "- build wall_ms / peak_rss_kib: $(jq -r '.verification_stages[]|select(.stage==\"build\")|(.wall_ms|tostring) + " / " + (.peak_rss_kib|tostring)' "$observation")"
+            echo "- test wall_ms / peak_rss_kib / executed / reused / skipped: $(jq -r '.verification_stages[]|select(.stage==\"test\")|(.wall_ms|tostring) + " / " + (.peak_rss_kib|tostring) + " / " + (.executed_test_count|tostring) + " / " + (.reused_test_evidence_count|tostring) + " / " + (.skipped_test_count|tostring)' "$observation")"
+            echo "- conformance wall_ms / peak_rss_kib: $(jq -r '.verification_stages[]|select(.stage==\"conformance\")|(.wall_ms|tostring) + " / " + (.peak_rss_kib|tostring)' "$observation")"
+            echo "- repository_writes: $(jq -r '.metrics[]|select(.name==\"repository_writes\")|.value' "$observation")"
+            echo "- identity digests: source=$(jq -r '.identity.source_sha256' "$observation"), artifact=$(jq -r '.identity.artifact_sha256' "$observation"), plan_receipt=$(jq -r '.identity.plan_receipt_sha256' "$observation"), binary=$(jq -r '.identity.binary_sha256' "$observation")"
             echo "- artifact digest: ${{ steps.evidence.outputs.artifact-digest }}"
           } >> "$GITHUB_STEP_SUMMARY"
