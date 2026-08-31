@@ -23,6 +23,7 @@ jobs:
       VERSION_TAG: v0.2.0
       TRIGGER_TAG: release-v0.2.0-publish-1
       MAIN_SHA: 5444c1f9967ee42af05bf06094473e2950f6a366
+      TRIGGER_SHA: 563a7c9082d0e5ac46a783dfdbc9eae51a55d63a
       SOURCE_RUN_ID: '33345178464'
       ARTIFACT_ID: '9741768051'
       ARTIFACT_NAME: gooo-opentofu-bridge-evidence-5444c1f9967ee42af05bf06094473e2950f6a366
@@ -44,7 +45,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$GITHUB_REF" = "refs/tags/$TRIGGER_TAG"
-          test "$GITHUB_SHA" = "$MAIN_SHA"
+          test "$GITHUB_SHA" = "$TRIGGER_SHA"
 
           resolve_tag() {
             local tag=$1
@@ -56,7 +57,7 @@ jobs:
             printf '%s' "$resolved"
           }
 
-          test "$(resolve_tag "$TRIGGER_TAG")" = "$MAIN_SHA"
+          test "$(resolve_tag "$TRIGGER_TAG")" = "$TRIGGER_SHA"
           gh api "repos/$REPOSITORY/commits/$MAIN_SHA" --jq '.sha' | grep -Fx "$MAIN_SHA" >/dev/null
 
           gh api "repos/$REPOSITORY/actions/runs/$SOURCE_RUN_ID" > "$WORK_DIR-source-run.json"
@@ -136,6 +137,7 @@ jobs:
             --arg repository "$REPOSITORY" \
             --arg version "$VERSION_TAG" \
             --arg main_sha "$MAIN_SHA" \
+            --arg trigger_sha "$TRIGGER_SHA" \
             --arg trigger_tag "$TRIGGER_TAG" \
             --argjson run_id "$SOURCE_RUN_ID" \
             --arg run_url "https://github.com/$REPOSITORY/actions/runs/$SOURCE_RUN_ID" \
@@ -150,7 +152,7 @@ jobs:
             --arg plan_receipt_sha "50f4f37e832bbd71e139205c9321aebee46db207137affa28e33401124d7450a" \
             --arg validation_sha "885c62ce390bfc799f1ebb81277dd7a79a4ea3a421e82adede0fa35c88cfe041" \
             --arg oracle_sha "5e3df015b069e18bb3151c7fb5266bf15c01ce76bcd51fd03993409c9f250e24" \
-            '{schema:"gooo/opentofu-bridge/release-manifest/v1",version:$version,repository:$repository,main_sha:$main_sha,trigger_tag:$trigger_tag,source_run:{id:$run_id,url:$run_url,conclusion:"success"},workflow_artifact:{id:$artifact_id,name:$artifact_name,size_bytes:$artifact_size,digest:$artifact_digest},evidence:{zip:$zip_name,zip_sha256:$zip_sha,files:["bridge-observation.json","dossier.md","intent.tf.json","plan-receipt.json","validation.json","plan-oracle-v1.json"]},internal_receipts:{bridge_observation_sha256:$bridge_observation_sha,generated_artifact_sha256:$generated_artifact_sha,plan_receipt_sha256:$plan_receipt_sha,validation_sha256:$validation_sha,oracle_sha256:$oracle_sha},authority:{repository_writes:0,apply:0,destroy:0,cloud:0,network:0,source_write:0},release_immutable:true}' \
+            '{schema:"gooo/opentofu-bridge/release-manifest/v1",version:$version,repository:$repository,main_sha:$main_sha,trigger_tag:$trigger_tag,trigger_sha:$trigger_sha,source_run:{id:$run_id,url:$run_url,conclusion:"success"},workflow_artifact:{id:$artifact_id,name:$artifact_name,size_bytes:$artifact_size,digest:$artifact_digest},evidence:{zip:$zip_name,zip_sha256:$zip_sha,files:["bridge-observation.json","dossier.md","intent.tf.json","plan-receipt.json","validation.json","plan-oracle-v1.json"]},internal_receipts:{bridge_observation_sha256:$bridge_observation_sha,generated_artifact_sha256:$generated_artifact_sha,plan_receipt_sha256:$plan_receipt_sha,validation_sha256:$validation_sha,oracle_sha256:$oracle_sha},authority:{repository_writes:0,apply:0,destroy:0,cloud:0,network:0,source_write:0},release_immutable:true}' \
             > "$RELEASE_DIR/release-manifest.json"
           (cd "$RELEASE_DIR" && sha256sum release-manifest.json "$EVIDENCE_ZIP" > SHA256SUMS)
           test "$(wc -l < "$RELEASE_DIR/SHA256SUMS" | tr -d ' ')" = 2
