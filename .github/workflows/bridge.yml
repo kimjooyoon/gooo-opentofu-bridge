@@ -266,14 +266,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          jq '.input_artifact_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"' "$WORK_DIR/plan-receipt.json" > "$WORK_DIR/stale-plan-receipt.json"
           for mode in normal missing_plan stale_input unexpected_create unexpected_delete engine_inference unsupported_json malformed authority_escalation precedence; do
             start_ns=$(date +%s%N)
+            receipt_path="$WORK_DIR/plan-receipt.json"
+            if [ "$mode" = "missing_plan" ]; then receipt_path="$WORK_DIR/missing-plan-receipt.json"; fi
+            if [ "$mode" = "stale_input" ]; then receipt_path="$WORK_DIR/stale-plan-receipt.json"; fi
             /usr/bin/time -f '%M' -o "$WORK_DIR/$mode-rss-kib" python3 scripts/evaluator.py \
               --case "$mode" \
               --source examples/intent/main.gooo \
               --graph "$WORK_DIR/graph.json" \
               --artifact "$PUBLISH_DIR/intent.tf.json" \
-              --plan-receipt "$WORK_DIR/plan-receipt.json" \
+              --plan-receipt "$receipt_path" \
               --dossier "$PUBLISH_DIR/dossier.md" \
               --plan-match "$WORK_DIR/plan-match.json" \
               --oracle fixtures/plan-oracle-v1.json \
