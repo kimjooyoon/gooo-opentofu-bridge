@@ -1,0 +1,15 @@
+{
+  "commands": [
+    ["tofu", "apply"],
+    ["tofu", "destroy"],
+    ["tofu", "init"],
+    ["tofu", "test"]
+  ],
+  "side_effects": {
+    "apply": 1,
+    "destroy": 1,
+    "cloud": 1,
+    "network": 1,
+    "source_write": 1
+  }
+}

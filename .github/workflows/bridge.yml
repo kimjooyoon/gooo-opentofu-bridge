@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - 'feat/**'
   workflow_dispatch:
 
 permissions:
@@ -26,6 +27,12 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      - name: Pin Go 1.27 toolchain for evidence only
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.x'
+          cache: false
+
       - name: Acquire immutable Gooo, OpenTofu, and specification inputs
         shell: bash
         run: |
@@ -43,6 +50,10 @@ jobs:
             .authority.opentofu_plan_executions==1 and
             .authority.opentofu_apply_executions==0 and
             .authority.opentofu_test_executions==0 and
+            .authority.opentofu_destroy_executions==0 and
+            .authority.opentofu_backend_init_executions==0 and
+            .authority.local_vet_executions==0 and
+            .authority.local_conformance_executions==0 and
             .authority.opentofu_provider_accesses==0 and
             .authority.opentofu_cloud_accesses==0 and
             .authority.opentofu_runtime_network_access_claimed==false
@@ -99,6 +110,8 @@ jobs:
           tofu=$(find "$WORK_DIR/tofu/bin" -type f -name tofu -print -quit)
           test -n "$tofu"
           chmod +x "$tofu"
+          test "$(sha256sum "$tofu" | awk '{print $1}')" = "$(jq -r '.opentofu.binary_sha256' "$lock")"
+          sha256sum "$tofu" | awk '{print $1}' > "$WORK_DIR/tofu-binary-sha256"
           printf '%s\n' "$tofu" > "$WORK_DIR/tofu-path"
 
           spec_url=$(jq -r '.opentofu.json_spec.url' "$lock")
@@ -106,6 +119,14 @@ jobs:
           test "$(sha256sum "$WORK_DIR/opentofu-json-spec.mdx" | awk '{print $1}')" = "$(jq -r '.opentofu.json_spec.sha256' "$lock")"
           jq -e --arg ref "$(jq -r '.opentofu.json_spec.ref' "$lock")" --arg path "$(jq -r '.opentofu.json_spec.path' "$lock")" \
             '.opentofu.json_spec.ref==$ref and .opentofu.json_spec.path==$path' "$lock" >/dev/null
+          go version > "$WORK_DIR/go-version.txt"
+          jq -S -n \
+            --arg go_version "$(cat "$WORK_DIR/go-version.txt")" \
+            --arg python_version "$(python3 --version 2>&1)" \
+            --arg runner "$RUNNER_OS/$RUNNER_ARCH" \
+            '{schema:"gooo/opentofu-bridge/toolchain/v1",go_version:$go_version,python_version:$python_version,runner:$runner,go_required:"1.27.x"}' \
+            > "$WORK_DIR/toolchain-manifest.json"
+          grep -Eq 'go1\.27([.]|$)' "$WORK_DIR/go-version.txt"
 
       - name: Bind the released Gooo semantic graph
         shell: bash
@@ -127,6 +148,7 @@ jobs:
             exit "$gooo_status"
           fi
           end_ns=$(date +%s%N)
+          echo $((end_ns-start_ns)) > "$WORK_DIR/bind-wall-ns"
           echo $(( (end_ns-start_ns+999999)/1000000 )) > "$WORK_DIR/bind-wall-ms"
           set +e
           python3 scripts/bridge.py bind --source "$source" --graph "$WORK_DIR/graph.json" --denominator contracts/bridge-denominator-v1.json --output "$WORK_DIR/meta-bindings.json" 2> "$WORK_DIR/bridge-bind.stderr"
@@ -152,6 +174,7 @@ jobs:
             --denominator contracts/bridge-denominator-v1.json \
             --output-dir "$PUBLISH_DIR"
           end_ns=$(date +%s%N)
+          echo $((end_ns-start_ns)) > "$WORK_DIR/generate-wall-ns"
           echo $(( (end_ns-start_ns+999999)/1000000 )) > "$WORK_DIR/generate-wall-ms"
           test "$(find "$PUBLISH_DIR" -maxdepth 1 -type f -printf '%f\n' | sort | tr '\n' ' ')" = "dossier.md intent.tf.json "
 
@@ -162,45 +185,31 @@ jobs:
           mkdir -p "$WORK_DIR/module"
           cp "$PUBLISH_DIR/intent.tf.json" "$WORK_DIR/module/intent.tf.json"
           tofu=$(cat "$WORK_DIR/tofu-path")
+          "$tofu" version -json > "$WORK_DIR/tofu-version.json"
+          cat > "$WORK_DIR/validate-command.json" <<'EOF'
+          {"argv":["tofu","validate","-json"],"working_directory":"caller-owned-module","read_only":true}
+          EOF
           start_ns=$(date +%s%N)
           set +e
           (cd "$WORK_DIR/module" && /usr/bin/time -f '%M' -o "$WORK_DIR/validate-rss-kib" "$tofu" validate -json > "$WORK_DIR/tofu-validate.json")
           tofu_status=$?
           set -e
           end_ns=$(date +%s%N)
+          echo $((end_ns-start_ns)) > "$WORK_DIR/validate-wall-ns"
           echo $(( (end_ns-start_ns+999999)/1000000 )) > "$WORK_DIR/validate-wall-ms"
-          tofu_state=UNKNOWN
-          tofu_reason=OPENTOFU_VALIDATE_EXECUTION_UNAVAILABLE
-          if [ "$tofu_status" -eq 0 ] && jq -e '.valid==true and (.error_count==0 or .error_count==null)' "$WORK_DIR/tofu-validate.json" >/dev/null 2>&1; then
-            tofu_state=CLOSED
-            tofu_reason=
-            python3 scripts/bridge.py validate \
-              --artifact "$PUBLISH_DIR/intent.tf.json" \
-              --dossier "$PUBLISH_DIR/dossier.md" \
-              --lock contracts/release-lock-v1.json \
-              --spec "$WORK_DIR/opentofu-json-spec.mdx" \
-              --bindings "$WORK_DIR/meta-bindings.json" \
-              --denominator contracts/bridge-denominator-v1.json \
-              --output "$WORK_DIR/validation.json" \
-              --tofu-result "$WORK_DIR/tofu-validate.json"
-          elif [ -s "$WORK_DIR/tofu-validate.json" ] && jq -e '.valid==false and (.error_count|type=="number") and .error_count>0' "$WORK_DIR/tofu-validate.json" >/dev/null 2>&1; then
-            echo 'The official OpenTofu validator rejected the generated configuration.' >&2
-            cat "$WORK_DIR/tofu-validate.json" >&2
-            exit 1
+          validate_args=(
+            validate --artifact "$PUBLISH_DIR/intent.tf.json" --dossier "$PUBLISH_DIR/dossier.md"
+            --lock contracts/release-lock-v1.json --spec "$WORK_DIR/opentofu-json-spec.mdx"
+            --bindings "$WORK_DIR/meta-bindings.json" --denominator contracts/bridge-denominator-v1.json
+            --output "$WORK_DIR/validation.json" --source examples/intent/main.gooo --graph "$WORK_DIR/graph.json"
+            --toolchain-manifest "$WORK_DIR/toolchain-manifest.json" --command "$WORK_DIR/validate-command.json"
+            --binary "$tofu" --release-asset "$WORK_DIR/tofu/tofu.zip" --checksums-asset "$WORK_DIR/tofu/SHA256SUMS"
+            --version-json "$WORK_DIR/tofu-version.json" --exit-code "$tofu_status"
+          )
+          if [ -s "$WORK_DIR/tofu-validate.json" ]; then
+            python3 scripts/bridge.py "${validate_args[@]}" --tofu-result "$WORK_DIR/tofu-validate.json"
           else
-            if [ "$tofu_status" -ne 0 ]; then
-              tofu_reason=OPENTOFU_VALIDATE_NONZERO_WITHOUT_MACHINE_READABLE_RESULT
-            fi
-            python3 scripts/bridge.py validate \
-              --artifact "$PUBLISH_DIR/intent.tf.json" \
-              --dossier "$PUBLISH_DIR/dossier.md" \
-              --lock contracts/release-lock-v1.json \
-              --spec "$WORK_DIR/opentofu-json-spec.mdx" \
-              --bindings "$WORK_DIR/meta-bindings.json" \
-              --denominator contracts/bridge-denominator-v1.json \
-              --output "$WORK_DIR/validation.json" \
-              --tofu-state UNKNOWN \
-              --tofu-reason "$tofu_reason"
+            python3 scripts/bridge.py "${validate_args[@]}" --tofu-state UNKNOWN --tofu-reason OPENTOFU_VALIDATE_EXECUTION_UNAVAILABLE
           fi
           jq -e '.state=="CLOSED" and .structural_checks.output_file_count==2' "$WORK_DIR/validation.json" >/dev/null
 
@@ -209,17 +218,17 @@ jobs:
         run: |
           set -euo pipefail
           tofu=$(cat "$WORK_DIR/tofu-path")
-          set +e
           "$tofu" version -json > "$WORK_DIR/tofu-version.json"
-          version_status=$?
-          set -e
-          test "$version_status" -eq 0
+          jq -e '.terraform_version=="1.12.6" and .platform=="linux_amd64"' "$WORK_DIR/tofu-version.json" >/dev/null
+          jq -S -n '{argv:["tofu","plan","-refresh=false","-input=false","-json","-detailed-exitcode"],working_directory:"caller-owned-module",read_only:true}' > "$WORK_DIR/plan-command.json"
+          mapfile -t plan_args < <(jq -r '.argv[1:][]' "$WORK_DIR/plan-command.json")
           start_ns=$(date +%s%N)
           set +e
-          (cd "$WORK_DIR/module" && /usr/bin/time -f '%M' -o "$WORK_DIR/plan-rss-kib" "$tofu" plan -refresh=false -input=false -json -detailed-exitcode > "$WORK_DIR/tofu-plan.jsonl")
+          (cd "$WORK_DIR/module" && /usr/bin/time -f '%M' -o "$WORK_DIR/plan-rss-kib" "$tofu" "${plan_args[@]}" > "$WORK_DIR/tofu-plan.jsonl")
           plan_status=$?
           set -e
           end_ns=$(date +%s%N)
+          echo $((end_ns-start_ns)) > "$WORK_DIR/plan-wall-ns"
           echo $(( (end_ns-start_ns+999999)/1000000 )) > "$WORK_DIR/plan-wall-ms"
           test "$plan_status" -eq 0 -o "$plan_status" -eq 2
           plan_rss_kib=$(tail -n 1 "$WORK_DIR/plan-rss-kib")
@@ -233,6 +242,13 @@ jobs:
             --artifact "$PUBLISH_DIR/intent.tf.json" \
             --oracle fixtures/plan-oracle-v1.json \
             --lock contracts/release-lock-v1.json \
+            --source examples/intent/main.gooo \
+            --graph "$WORK_DIR/graph.json" \
+            --spec "$WORK_DIR/opentofu-json-spec.mdx" \
+            --toolchain-manifest "$WORK_DIR/toolchain-manifest.json" \
+            --command "$WORK_DIR/plan-command.json" \
+            --release-asset "$WORK_DIR/tofu/tofu.zip" \
+            --checksums-asset "$WORK_DIR/tofu/SHA256SUMS" \
             --exit-code "$plan_status" \
             --output "$WORK_DIR/plan-receipt.json"
           python3 scripts/bridge.py match-plan \
@@ -241,31 +257,47 @@ jobs:
             --oracle fixtures/plan-oracle-v1.json \
             --output "$WORK_DIR/plan-match.json"
           match_end_ns=$(date +%s%N)
+          echo $((match_end_ns-match_start_ns)) > "$WORK_DIR/match-wall-ns"
           echo $(( (match_end_ns-match_start_ns+999999)/1000000 )) > "$WORK_DIR/match-wall-ms"
           printf '%s\n' "$(cat "$WORK_DIR/plan-rss-kib")" > "$WORK_DIR/match-rss-kib"
-          jq -e '.state=="CLOSED" and .iac_engine=="OPENTOFU" and .engine_identity_source=="PINNED_RELEASE_LOCK" and .exit_code==2 and .drift_count==0 and (.resource_actions|sort_by(.address,.action))==[{"address":"terraform_data.hello","action":"create"}]' "$WORK_DIR/plan-receipt.json" >/dev/null
+          jq -e '.state=="CLOSED" and .iac_engine=="OPENTOFU" and .engine_identity_source=="PINNED_RELEASE_LOCK" and .engine_version=="1.12.6" and .exit_code==2 and .drift_count==0 and .binary_verified==true and .release.asset_verified==true and .release.checksums_verified==true and .version_consistent_with_pinned_release==true and .command_verified==true and .command.argv==["tofu","plan","-refresh=false","-input=false","-json","-detailed-exitcode"] and .read_only.apply==0 and .read_only.destroy==0 and (.resource_actions|sort_by(.address,.action))==[{"address":"terraform_data.hello","action":"create"}]' "$WORK_DIR/plan-receipt.json" >/dev/null
           jq -e '.state=="CLOSED" and .claim.state=="CLOSED" and .expected_resource_actions==[{"address":"terraform_data.hello","action":"create"}] and .observed_resource_actions==[{"address":"terraform_data.hello","action":"create"}]' "$WORK_DIR/plan-match.json" >/dev/null
 
-      - name: Evaluate normal, UNKNOWN, and REFUTED cases
+      - name: Evaluate closed, UNKNOWN, REFUTED, and FIXED_POINT cases independently
         shell: bash
         run: |
           set -euo pipefail
-          for mode in normal unknown refuted; do
+          jq '.input_artifact_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"' "$WORK_DIR/plan-receipt.json" > "$WORK_DIR/stale-plan-receipt.json"
+          for mode in normal missing_plan stale_input unexpected_create unexpected_delete engine_inference unsupported_json malformed authority_escalation precedence; do
             start_ns=$(date +%s%N)
-            /usr/bin/time -f '%M' -o "$WORK_DIR/$mode-rss-kib" python3 scripts/bridge.py evaluate \
-              --mode "$mode" \
+            receipt_path="$WORK_DIR/plan-receipt.json"
+            if [ "$mode" = "missing_plan" ]; then receipt_path="$WORK_DIR/missing-plan-receipt.json"; fi
+            if [ "$mode" = "stale_input" ]; then receipt_path="$WORK_DIR/stale-plan-receipt.json"; fi
+            /usr/bin/time -f '%M' -o "$WORK_DIR/$mode-rss-kib" python3 scripts/evaluator.py \
+              --case "$mode" \
+              --source examples/intent/main.gooo \
+              --graph "$WORK_DIR/graph.json" \
               --artifact "$PUBLISH_DIR/intent.tf.json" \
+              --plan-receipt "$receipt_path" \
               --dossier "$PUBLISH_DIR/dossier.md" \
               --plan-match "$WORK_DIR/plan-match.json" \
+              --oracle fixtures/plan-oracle-v1.json \
               --bindings "$WORK_DIR/meta-bindings.json" \
-              --denominator contracts/bridge-denominator-v1.json \
+              --malformed-plan fixtures/malformed-plan.jsonl \
+              --authority-fixture fixtures/authority-escalation.json \
               --output "$WORK_DIR/cases/$mode.json"
             end_ns=$(date +%s%N)
+            echo $((end_ns-start_ns)) > "$WORK_DIR/$mode-wall-ns"
             echo $(( (end_ns-start_ns+999999)/1000000 )) > "$WORK_DIR/$mode-wall-ms"
           done
           jq -e '.decision=="CLOSED"' "$WORK_DIR/cases/normal.json" >/dev/null
-          jq -e '.decision=="FAIL_CLOSED" and ([.claims[].unknown_class]|sort)==["DIRECT_MISSING","DIRECT_MISSING","OBSERVATION_UNAVAILABLE"] and all(.claims[]; (.stage and .step and .reason and .unknown_class and .next_operation and (.blocked_by|type=="array")))' "$WORK_DIR/cases/unknown.json" >/dev/null
-          jq -e '.decision=="FAIL_CLOSED" and .precedence=="REFUTED_OVER_UNKNOWN" and all(.claims[];.state=="REFUTED")' "$WORK_DIR/cases/refuted.json" >/dev/null
+          jq -e '.decision=="FAIL_CLOSED" and all(.claims[]; .state=="UNKNOWN" and (.stage and .step and .reason and .unknown_class and .next_operation and (.blocked_by|type=="array")))' "$WORK_DIR/cases/missing_plan.json" >/dev/null
+          jq -e '.decision=="FAIL_CLOSED" and all(.claims[]; .state=="UNKNOWN" and (.stage and .step and .reason and .unknown_class and .next_operation and (.blocked_by|type=="array")))' "$WORK_DIR/cases/stale_input.json" >/dev/null
+          for mode in unexpected_create unexpected_delete engine_inference unsupported_json authority_escalation; do
+            jq -e '.decision=="FAIL_CLOSED" and all(.claims[];.state=="REFUTED")' "$WORK_DIR/cases/$mode.json" >/dev/null
+          done
+          jq -e '.decision=="FIXED_POINT" and all(.claims[];.state=="FIXED_POINT")' "$WORK_DIR/cases/malformed.json" >/dev/null
+          jq -e '.decision=="FAIL_CLOSED" and .precedence=="REFUTED_OVER_UNKNOWN_OVER_CLOSED" and ([.claims[].state]|sort)==["CLOSED","REFUTED","UNKNOWN"]' "$WORK_DIR/cases/precedence.json" >/dev/null
 
       - name: Verify deterministic replay
         shell: bash
@@ -281,6 +313,7 @@ jobs:
             --denominator contracts/bridge-denominator-v1.json \
             --output "$WORK_DIR/replay.json"
           end_ns=$(date +%s%N)
+          echo $((end_ns-start_ns)) > "$WORK_DIR/replay-wall-ns"
           echo $(( (end_ns-start_ns+999999)/1000000 )) > "$WORK_DIR/replay-wall-ms"
           jq -e '.state=="CLOSED" and .comparison_count==2 and all(.comparisons[];.byte_equal==true)' "$WORK_DIR/replay.json" >/dev/null
 
@@ -299,6 +332,9 @@ jobs:
           physical_lines=${physical_lines:-0}
           gooo_lines=$(find . -path './.git' -prune -o -type f -name '*.gooo' -print0 | xargs -0 awk 'END {print NR+0}')
           gooo_lines=${gooo_lines:-0}
+          opentofu_files=$(find . -path './.git' -prune -o -type f \( -name '*.tf' -o -name '*.tf.json' -o -name '*.tofu.json' \) -print | awk 'END {print NR+0}')
+          opentofu_lines=$(find . -path './.git' -prune -o -type f \( -name '*.tf' -o -name '*.tf.json' -o -name '*.tofu.json' \) -print0 | xargs -0 awk 'END {print NR+0}')
+          opentofu_lines=${opentofu_lines:-0}
           python_lines=$(find . -path './.git' -prune -o -type f -name '*.py' -print0 | xargs -0 awk 'END {print NR+0}')
           python_lines=${python_lines:-0}
           workflow_lines=$(lines_for .github/workflows/bridge.yml)
@@ -308,6 +344,8 @@ jobs:
             --argjson go_files "$go_files" \
             --argjson go_lines "$go_lines" \
             --argjson gooo_files "$gooo_files" \
+            --argjson opentofu_files "$opentofu_files" \
+            --argjson opentofu_lines "$opentofu_lines" \
             --argjson physical "$physical_lines" \
             --argjson gooo "$gooo_lines" \
             --argjson python "$python_lines" \
@@ -318,6 +356,8 @@ jobs:
               {name:"go_physical_files",value:$go_files,unit:"files",activity:"GenerateOpenTofuCompatibleArtifact"},
               {name:"go_physical_lines",value:$go_lines,unit:"lines",activity:"GenerateOpenTofuCompatibleArtifact"},
               {name:"gooo_physical_files",value:$gooo_files,unit:"files",activity:"DeclareGoooInfrastructureIntent"},
+              {name:"opentofu_physical_files",value:$opentofu_files,unit:"files",activity:"GenerateOpenTofuCompatibleArtifact"},
+              {name:"opentofu_physical_lines",value:$opentofu_lines,unit:"lines",activity:"GenerateOpenTofuCompatibleArtifact"},
               {name:"repository_physical_lines",value:$physical,unit:"lines",activity:"VerifyGeneratedOutputs"},
               {name:"gooo_physical_lines",value:$gooo,unit:"lines",activity:"DeclareGoooInfrastructureIntent"},
               {name:"python_physical_lines",value:$python,unit:"lines",activity:"GenerateOpenTofuCompatibleArtifact"},
@@ -325,28 +365,37 @@ jobs:
             ]' > "$WORK_DIR/line-metrics.json"
           jq -S -n \
             --argjson bind_wall "$(cat "$WORK_DIR/bind-wall-ms")" --argjson bind_rss "$(cat "$WORK_DIR/bind-rss-kib")" \
+            --argjson bind_ns "$(cat "$WORK_DIR/bind-wall-ns")" \
             --argjson generate_wall "$(cat "$WORK_DIR/generate-wall-ms")" --argjson generate_rss "$(cat "$WORK_DIR/generate-rss-kib")" \
+            --argjson generate_ns "$(cat "$WORK_DIR/generate-wall-ns")" \
             --argjson validate_wall "$(cat "$WORK_DIR/validate-wall-ms")" --argjson validate_rss "$(cat "$WORK_DIR/validate-rss-kib")" \
+            --argjson validate_ns "$(cat "$WORK_DIR/validate-wall-ns")" \
             --argjson plan_wall "$(cat "$WORK_DIR/plan-wall-ms")" --argjson plan_rss "$(cat "$WORK_DIR/plan-rss-kib")" \
+            --argjson plan_ns "$(cat "$WORK_DIR/plan-wall-ns")" \
             --argjson match_wall "$(cat "$WORK_DIR/match-wall-ms")" --argjson match_rss "$(cat "$WORK_DIR/match-rss-kib")" \
-            --argjson normal_wall "$(cat "$WORK_DIR/normal-wall-ms")" --argjson normal_rss "$(cat "$WORK_DIR/normal-rss-kib")" \
-            --argjson unknown_wall "$(cat "$WORK_DIR/unknown-wall-ms")" --argjson unknown_rss "$(cat "$WORK_DIR/unknown-rss-kib")" \
-            --argjson refuted_wall "$(cat "$WORK_DIR/refuted-wall-ms")" --argjson refuted_rss "$(cat "$WORK_DIR/refuted-rss-kib")" \
-            --argjson replay_wall "$(cat "$WORK_DIR/replay-wall-ms")" --argjson replay_rss "$(cat "$WORK_DIR/replay-rss-kib")" \
+            --argjson match_ns "$(cat "$WORK_DIR/match-wall-ns")" \
+            --argjson normal_wall "$(cat "$WORK_DIR/normal-wall-ms")" --argjson normal_rss "$(cat "$WORK_DIR/normal-rss-kib")" --argjson normal_ns "$(cat "$WORK_DIR/normal-wall-ns")" \
+            --argjson missing_wall "$(cat "$WORK_DIR/missing_plan-wall-ms")" --argjson missing_rss "$(cat "$WORK_DIR/missing_plan-rss-kib")" --argjson missing_ns "$(cat "$WORK_DIR/missing_plan-wall-ns")" \
+            --argjson stale_wall "$(cat "$WORK_DIR/stale_input-wall-ms")" --argjson stale_rss "$(cat "$WORK_DIR/stale_input-rss-kib")" --argjson stale_ns "$(cat "$WORK_DIR/stale_input-wall-ns")" \
+            --argjson create_wall "$(cat "$WORK_DIR/unexpected_create-wall-ms")" --argjson create_rss "$(cat "$WORK_DIR/unexpected_create-rss-kib")" --argjson create_ns "$(cat "$WORK_DIR/unexpected_create-wall-ns")" \
+            --argjson delete_wall "$(cat "$WORK_DIR/unexpected_delete-wall-ms")" --argjson delete_rss "$(cat "$WORK_DIR/unexpected_delete-rss-kib")" --argjson delete_ns "$(cat "$WORK_DIR/unexpected_delete-wall-ns")" \
+            --argjson engine_wall "$(cat "$WORK_DIR/engine_inference-wall-ms")" --argjson engine_rss "$(cat "$WORK_DIR/engine_inference-rss-kib")" --argjson engine_ns "$(cat "$WORK_DIR/engine_inference-wall-ns")" \
+            --argjson json_wall "$(cat "$WORK_DIR/unsupported_json-wall-ms")" --argjson json_rss "$(cat "$WORK_DIR/unsupported_json-rss-kib")" --argjson json_ns "$(cat "$WORK_DIR/unsupported_json-wall-ns")" \
+            --argjson malformed_wall "$(cat "$WORK_DIR/malformed-wall-ms")" --argjson malformed_rss "$(cat "$WORK_DIR/malformed-rss-kib")" --argjson malformed_ns "$(cat "$WORK_DIR/malformed-wall-ns")" \
+            --argjson authority_wall "$(cat "$WORK_DIR/authority_escalation-wall-ms")" --argjson authority_rss "$(cat "$WORK_DIR/authority_escalation-rss-kib")" --argjson authority_ns "$(cat "$WORK_DIR/authority_escalation-wall-ns")" \
+            --argjson precedence_wall "$(cat "$WORK_DIR/precedence-wall-ms")" --argjson precedence_rss "$(cat "$WORK_DIR/precedence-rss-kib")" --argjson precedence_ns "$(cat "$WORK_DIR/precedence-wall-ns")" \
+            --argjson replay_wall "$(cat "$WORK_DIR/replay-wall-ms")" --argjson replay_rss "$(cat "$WORK_DIR/replay-rss-kib")" --argjson replay_ns "$(cat "$WORK_DIR/replay-wall-ns")" \
             --arg state "$(jq -r '.official_opentofu.state' "$WORK_DIR/validation.json")" \
             '[
-              {stage:"released_graph_dump",activity:"BindGoooIntentToOpenTofu",wall_ms:$bind_wall,peak_rss_kib:$bind_rss,executions:1,reused:0,state:"CLOSED",execution_state:"EXECUTED",count:1},
-              {stage:"deterministic_generation",activity:"GenerateOpenTofuCompatibleArtifact",wall_ms:$generate_wall,peak_rss_kib:$generate_rss,executions:1,reused:0,state:"CLOSED",execution_state:"EXECUTED",count:1},
-              {stage:"official_opentofu_validation",activity:"VerifyGeneratedOutputs",wall_ms:$validate_wall,peak_rss_kib:$validate_rss,executions:1,reused:0,state:$state,execution_state:"EXECUTED",count:1},
-              {stage:"pinned_opentofu_plan",activity:"GenerateOpenTofuPlanReceipt",wall_ms:$plan_wall,peak_rss_kib:$plan_rss,executions:1,reused:0,state:"CLOSED",execution_state:"EXECUTED",count:1},
-              {stage:"resource_action_match",activity:"MatchGoooIntentToOpenTofuPlan",wall_ms:$match_wall,peak_rss_kib:$match_rss,executions:1,reused:0,state:"CLOSED",execution_state:"EXECUTED",count:1},
-              {stage:"normal_case_evaluation",activity:"VerifyGeneratedOutputs",wall_ms:$normal_wall,peak_rss_kib:$normal_rss,executions:1,reused:0,state:"CLOSED",execution_state:"EXECUTED",count:1},
-              {stage:"unknown_case_evaluation",activity:"PreserveUnknownCase",wall_ms:$unknown_wall,peak_rss_kib:$unknown_rss,executions:1,reused:0,state:"CLOSED",execution_state:"EXECUTED",count:1},
-              {stage:"refuted_case_evaluation",activity:"RefuteContradictionCase",wall_ms:$refuted_wall,peak_rss_kib:$refuted_rss,executions:1,reused:0,state:"CLOSED",execution_state:"EXECUTED",count:1},
-              {stage:"deterministic_replay",activity:"VerifyDeterministicReplay",wall_ms:$replay_wall,peak_rss_kib:$replay_rss,executions:1,reused:0,state:"CLOSED",execution_state:"EXECUTED",count:1},
-              {stage:"build",activity:"GenerateOpenTofuCompatibleArtifact",wall_ms:($bind_wall+$generate_wall),peak_rss_kib:($bind_rss|if $generate_rss > . then $generate_rss else . end),executions:2,reused:0,state:"CLOSED",execution_state:"EXECUTED",count:2},
-              {stage:"test",activity:"PreserveReadOnlyBoundary",wall_ms:($normal_wall+$unknown_wall+$refuted_wall),peak_rss_kib:([$normal_rss,$unknown_rss,$refuted_rss]|max),executions:3,reused:0,state:"CLOSED",execution_state:"EXECUTED",count:3,executed_test_count:3,reused_test_evidence_count:0,skipped_test_count:0},
-              {stage:"conformance",activity:"MatchGoooIntentToOpenTofuPlan",wall_ms:($validate_wall+$plan_wall+$match_wall+$replay_wall),peak_rss_kib:([$validate_rss,$plan_rss,$match_rss,$replay_rss]|max),executions:4,reused:0,state:"CLOSED",execution_state:"EXECUTED",count:4}
+              {stage:"released_graph_dump",activity:"BindGoooIntentToOpenTofu",wall_ms:$bind_wall,wall_ns:$bind_ns,peak_rss_kib:$bind_rss,executions:1,reused:0,skipped:0,state:"CLOSED",execution_state:"EXECUTED",count:1},
+              {stage:"deterministic_generation",activity:"GenerateOpenTofuCompatibleArtifact",wall_ms:$generate_wall,wall_ns:$generate_ns,peak_rss_kib:$generate_rss,executions:1,reused:0,skipped:0,state:"CLOSED",execution_state:"EXECUTED",count:1},
+              {stage:"official_opentofu_validation",activity:"VerifyGeneratedOutputs",wall_ms:$validate_wall,wall_ns:$validate_ns,peak_rss_kib:$validate_rss,executions:1,reused:0,skipped:0,state:$state,execution_state:"EXECUTED",count:1},
+              {stage:"pinned_opentofu_plan",activity:"GenerateOpenTofuPlanReceipt",wall_ms:$plan_wall,wall_ns:$plan_ns,peak_rss_kib:$plan_rss,executions:1,reused:0,skipped:0,state:"CLOSED",execution_state:"EXECUTED",count:1},
+              {stage:"resource_action_match",activity:"MatchGoooIntentToOpenTofuPlan",wall_ms:$match_wall,wall_ns:$match_ns,peak_rss_kib:$match_rss,executions:1,reused:0,skipped:0,state:"CLOSED",execution_state:"EXECUTED",count:1},
+              {stage:"deterministic_replay",activity:"VerifyDeterministicReplay",wall_ms:$replay_wall,wall_ns:$replay_ns,peak_rss_kib:$replay_rss,executions:1,reused:0,skipped:0,state:"CLOSED",execution_state:"EXECUTED",count:1},
+              {stage:"build",activity:"GenerateOpenTofuCompatibleArtifact",wall_ms:($bind_wall+$generate_wall),wall_ns:($bind_ns+$generate_ns),peak_rss_kib:([$bind_rss,$generate_rss]|max),executions:2,reused:0,skipped:0,state:"CLOSED",execution_state:"EXECUTED",count:2},
+              {stage:"test",activity:"PreserveReadOnlyBoundary",wall_ms:(($normal_ns+$missing_ns+$stale_ns+$create_ns+$delete_ns+$engine_ns+$json_ns+$malformed_ns+$authority_ns+$precedence_ns+999999)/1000000|floor),wall_ns:($normal_ns+$missing_ns+$stale_ns+$create_ns+$delete_ns+$engine_ns+$json_ns+$malformed_ns+$authority_ns+$precedence_ns),peak_rss_kib:([$normal_rss,$missing_rss,$stale_rss,$create_rss,$delete_rss,$engine_rss,$json_rss,$malformed_rss,$authority_rss,$precedence_rss]|max),executions:10,reused:0,skipped:0,state:"CLOSED",execution_state:"EXECUTED",count:10,executed_test_count:10,reused_test_evidence_count:0,skipped_test_count:0,test_cases:["normal","missing_plan","stale_input","unexpected_create","unexpected_delete","engine_inference","unsupported_json","malformed","authority_escalation","precedence"]},
+              {stage:"conformance",activity:"MatchGoooIntentToOpenTofuPlan",wall_ms:(($validate_ns+$plan_ns+$match_ns+$replay_ns+999999)/1000000|floor),wall_ns:($validate_ns+$plan_ns+$match_ns+$replay_ns),peak_rss_kib:([$validate_rss,$plan_rss,$match_rss,$replay_rss]|max),executions:4,reused:0,skipped:0,state:"CLOSED",execution_state:"EXECUTED",count:4}
             ]' > "$WORK_DIR/measurements.json"
           test -z "$(git status --porcelain)"
           python3 scripts/bridge.py record \
@@ -373,26 +422,37 @@ jobs:
           cp "$WORK_DIR/validation.json" "$EVIDENCE_DIR/validation.json"
           cp "$WORK_DIR/tofu-validate.json" "$EVIDENCE_DIR/tofu-validate.json" 2>/dev/null || true
           cp "$WORK_DIR/tofu-version.json" "$EVIDENCE_DIR/tofu-version.json"
+          cp "$WORK_DIR/toolchain-manifest.json" "$EVIDENCE_DIR/toolchain-manifest.json"
+          cp "$WORK_DIR/validate-command.json" "$EVIDENCE_DIR/validate-command.json"
+          cp "$WORK_DIR/plan-command.json" "$EVIDENCE_DIR/plan-command.json"
           cp "$WORK_DIR/tofu-plan.jsonl" "$EVIDENCE_DIR/tofu-plan.jsonl"
           cp "$WORK_DIR/plan-receipt.json" "$EVIDENCE_DIR/plan-receipt.json"
           cp "$WORK_DIR/plan-match.json" "$EVIDENCE_DIR/plan-match.json"
           cp fixtures/plan-oracle-v1.json "$EVIDENCE_DIR/plan-oracle-v1.json"
           cp "$WORK_DIR/replay.json" "$EVIDENCE_DIR/replay.json"
-          cp "$WORK_DIR/cases/normal.json" "$EVIDENCE_DIR/case-normal.json"
-          cp "$WORK_DIR/cases/unknown.json" "$EVIDENCE_DIR/case-unknown.json"
-          cp "$WORK_DIR/cases/refuted.json" "$EVIDENCE_DIR/case-refuted.json"
+          for case_file in normal missing_plan stale_input unexpected_create unexpected_delete engine_inference unsupported_json malformed authority_escalation precedence; do
+            cp "$WORK_DIR/cases/$case_file.json" "$EVIDENCE_DIR/case-$case_file.json"
+          done
           jq -e '
             .state=="CLOSED" and
             .user_path.step_count==5 and
             .generated_outputs.file_count==2 and
             (.metrics|all(.[]; (.activity_id|type)=="string")) and
-            ([.cases.normal.decision,.cases.unknown.decision,.cases.refuted.decision]|sort)==["CLOSED","FAIL_CLOSED","FAIL_CLOSED"] and
-            ([.cases.unknown.claims[].unknown_class]|sort)==["DIRECT_MISSING","DIRECT_MISSING","OBSERVATION_UNAVAILABLE"] and
-            all(.cases.refuted.claims[];.state=="REFUTED") and
+            .cases.normal.decision=="CLOSED" and
+            .cases.missing_plan.decision=="FAIL_CLOSED" and
+            .cases.stale_input.decision=="FAIL_CLOSED" and
+            all([.cases.unexpected_create,.cases.unexpected_delete,.cases.engine_inference,.cases.unsupported_json,.cases.authority_escalation][];.decision=="FAIL_CLOSED" and all(.claims[];.state=="REFUTED")) and
+            .cases.precedence.decision=="FAIL_CLOSED" and ([.cases.precedence.claims[].state]|sort)==["CLOSED","REFUTED","UNKNOWN"] and
+            .cases.malformed.decision=="FIXED_POINT" and all(.cases.malformed.claims[];.state=="FIXED_POINT") and
+            all([.cases.missing_plan,.cases.stale_input][].claims[]; .state=="UNKNOWN" and (.stage and .step and .reason and .unknown_class and .next_operation and (.blocked_by|type=="array"))) and
             .plan_match.state=="CLOSED" and
             .plan_receipt.iac_engine=="OPENTOFU" and
+            .plan_receipt.engine_version=="1.12.6" and
+            .plan_receipt.binary_verified==true and
+            .plan_receipt.command_verified==true and
             .plan_receipt.exit_code==2 and
-            (.metrics|any(.[];.name=="repository_writes" and .value==0))
+            (.metrics|any(.[];.name=="repository_writes" and .value==0)) and
+            (.metrics|any(.[];.name=="cross_project_required_gates" and .value==0))
           ' "$EVIDENCE_DIR/bridge-observation.json" >/dev/null
 
       - name: Upload bridge evidence
@@ -412,15 +472,15 @@ jobs:
           {
             echo "## Gooo OpenTofu Bridge"
             echo
-            echo "- normal / UNKNOWN / REFUTED: 1 / 1 / 1"
+            echo "- cases: normal=CLOSED, missing_plan=UNKNOWN, stale_input=UNKNOWN, unexpected_create=REFUTED, unexpected_delete=REFUTED, engine_inference=REFUTED, unsupported_json=REFUTED, malformed=FIXED_POINT, authority_escalation=REFUTED"
             echo "- generated files / bytes: $(jq -r '.generated_outputs.file_count' "$observation") / $(jq -r '.generated_outputs.bytes' "$observation")"
             echo "- user path steps: $(jq -r '.user_path.step_count' "$observation")"
             echo "- official OpenTofu validation: $(jq -r '.validation.official_opentofu.state' "$observation")"
             echo "- OpenTofu plan: $(jq -r '.plan_receipt.iac_engine + " " + .plan_receipt.engine_version + ", exit_code=" + (.plan_receipt.exit_code|tostring) + ", resource_actions=" + (.plan_match.resource_action_count|tostring)' "$observation")"
-            echo "- build wall_ms / peak_rss_kib: $(jq -r '.verification_stages[]|select(.stage==\"build\")|(.wall_ms|tostring) + " / " + (.peak_rss_kib|tostring)' "$observation")"
+            echo "- build wall_ms / wall_ns / peak_rss_kib: $(jq -r '.verification_stages[]|select(.stage==\"build\")|(.wall_ms|tostring) + " / " + (.wall_ns|tostring) + " / " + (.peak_rss_kib|tostring)' "$observation")"
             echo "- test wall_ms / peak_rss_kib / executed / reused / skipped: $(jq -r '.verification_stages[]|select(.stage==\"test\")|(.wall_ms|tostring) + " / " + (.peak_rss_kib|tostring) + " / " + (.executed_test_count|tostring) + " / " + (.reused_test_evidence_count|tostring) + " / " + (.skipped_test_count|tostring)' "$observation")"
-            echo "- conformance wall_ms / peak_rss_kib: $(jq -r '.verification_stages[]|select(.stage==\"conformance\")|(.wall_ms|tostring) + " / " + (.peak_rss_kib|tostring)' "$observation")"
-            echo "- repository_writes: $(jq -r '.metrics[]|select(.name==\"repository_writes\")|.value' "$observation")"
-            echo "- identity digests: source=$(jq -r '.identity.source_sha256' "$observation"), artifact=$(jq -r '.identity.artifact_sha256' "$observation"), plan_receipt=$(jq -r '.identity.plan_receipt_sha256' "$observation"), binary=$(jq -r '.identity.binary_sha256' "$observation")"
+            echo "- conformance wall_ms / wall_ns / peak_rss_kib: $(jq -r '.verification_stages[]|select(.stage==\"conformance\")|(.wall_ms|tostring) + " / " + (.wall_ns|tostring) + " / " + (.peak_rss_kib|tostring)' "$observation")"
+            echo "- repository_writes / cross_project_required_gates: $(jq -r '[.metrics[]|select(.name==\"repository_writes\" or .name==\"cross_project_required_gates\")|.value]|join(" / ")' "$observation")"
+            echo "- identity digests: source=$(jq -r '.identity.source_sha256' "$observation"), artifact=$(jq -r '.identity.artifact_sha256' "$observation"), plan_receipt=$(jq -r '.identity.plan_receipt_sha256' "$observation"), binary=$(jq -r '.identity.binary_sha256' "$observation"), evaluator=$(jq -r '.evaluator.sha256' "$observation")"
             echo "- artifact digest: ${{ steps.evidence.outputs.artifact-digest }}"
           } >> "$GITHUB_STEP_SUMMARY"
