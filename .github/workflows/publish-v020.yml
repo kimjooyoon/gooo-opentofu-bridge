@@ -3,7 +3,7 @@ name: Publish immutable v0.2.0 evidence
 on:
   push:
     tags:
-      - release-v0.2.0-publish-1
+      - 'release-v0.2.0-publish-*'
 
 permissions:
   contents: write
@@ -21,7 +21,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       REPOSITORY: kimjooyoon/gooo-opentofu-bridge
       VERSION_TAG: v0.2.0
-      TRIGGER_TAG: release-v0.2.0-publish-1
+      TRIGGER_TAG: ${{ github.ref_name }}
       MAIN_SHA: 5444c1f9967ee42af05bf06094473e2950f6a366
       TRIGGER_SHA: ${{ github.sha }}
       SOURCE_RUN_ID: '33345178464'
@@ -71,7 +71,7 @@ jobs:
             --arg name "$ARTIFACT_NAME" --argjson size "$ARTIFACT_SIZE" --arg digest "$ARTIFACT_DIGEST" --arg sha "$MAIN_SHA" \
             '.id==$artifact and .name==$name and .size_in_bytes==$size and .digest==$digest and .expired==false and .workflow_run.id==$run and .workflow_run.head_sha==$sha' \
             "$WORK_DIR/artifact-metadata.json" >/dev/null
-          gh api -H 'Accept: application/zip' "repos/$REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$WORK_DIR/artifact.zip"
+          gh api "repos/$REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$WORK_DIR/artifact.zip"
           test "$(wc -c < "$WORK_DIR/artifact.zip" | tr -d ' ')" = "$ARTIFACT_SIZE"
           test "sha256:$(sha256sum "$WORK_DIR/artifact.zip" | awk '{print $1}')" = "$ARTIFACT_DIGEST"
           unzip -q "$WORK_DIR/artifact.zip" -d "$WORK_DIR/artifact"
