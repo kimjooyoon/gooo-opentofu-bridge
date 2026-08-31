@@ -305,6 +305,8 @@ jobs:
           python_lines=$(find . -path './.git' -prune -o -type f -name '*.py' -print0 | xargs -0 awk 'END {print NR+0}')
           python_lines=${python_lines:-0}
           workflow_lines=$(lines_for .github/workflows/bridge.yml)
+          printf 'line inputs: dirs=%q files=%q go_files=%q go_lines=%q gooo_files=%q physical=%q gooo=%q python=%q workflow=%q\n' \
+            "$descendant_dirs" "$regular_files" "$go_files" "$go_lines" "$gooo_files" "$physical_lines" "$gooo_lines" "$python_lines" "$workflow_lines"
           jq -S -n \
             --argjson dirs "$descendant_dirs" \
             --argjson files "$regular_files" \
@@ -326,6 +328,16 @@ jobs:
               {name:"python_physical_lines",value:$python,unit:"lines",activity:"GenerateOpenTofuCompatibleArtifact"},
               {name:"workflow_physical_lines",value:$workflow,unit:"lines",activity:"PreserveReadOnlyBoundary"}
             ]' > "$WORK_DIR/line-metrics.json"
+          printf 'timing inputs: bind_wall=%q bind_rss=%q generate_wall=%q generate_rss=%q validate_wall=%q validate_rss=%q plan_wall=%q plan_rss=%q match_wall=%q match_rss=%q normal_wall=%q normal_rss=%q unknown_wall=%q unknown_rss=%q refuted_wall=%q refuted_rss=%q replay_wall=%q replay_rss=%q\n' \
+            "$(cat "$WORK_DIR/bind-wall-ms")" "$(cat "$WORK_DIR/bind-rss-kib")" \
+            "$(cat "$WORK_DIR/generate-wall-ms")" "$(cat "$WORK_DIR/generate-rss-kib")" \
+            "$(cat "$WORK_DIR/validate-wall-ms")" "$(cat "$WORK_DIR/validate-rss-kib")" \
+            "$(cat "$WORK_DIR/plan-wall-ms")" "$(cat "$WORK_DIR/plan-rss-kib")" \
+            "$(cat "$WORK_DIR/match-wall-ms")" "$(cat "$WORK_DIR/match-rss-kib")" \
+            "$(cat "$WORK_DIR/normal-wall-ms")" "$(cat "$WORK_DIR/normal-rss-kib")" \
+            "$(cat "$WORK_DIR/unknown-wall-ms")" "$(cat "$WORK_DIR/unknown-rss-kib")" \
+            "$(cat "$WORK_DIR/refuted-wall-ms")" "$(cat "$WORK_DIR/refuted-rss-kib")" \
+            "$(cat "$WORK_DIR/replay-wall-ms")" "$(cat "$WORK_DIR/replay-rss-kib")"
           jq -S -n \
             --argjson bind_wall "$(cat "$WORK_DIR/bind-wall-ms")" --argjson bind_rss "$(cat "$WORK_DIR/bind-rss-kib")" \
             --argjson generate_wall "$(cat "$WORK_DIR/generate-wall-ms")" --argjson generate_rss "$(cat "$WORK_DIR/generate-rss-kib")" \
