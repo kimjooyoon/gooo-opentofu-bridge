@@ -74,7 +74,9 @@ jobs:
           gh api "repos/$REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$WORK_DIR/artifact.zip"
           test "$(wc -c < "$WORK_DIR/artifact.zip" | tr -d ' ')" = "$ARTIFACT_SIZE"
           test "sha256:$(sha256sum "$WORK_DIR/artifact.zip" | awk '{print $1}')" = "$ARTIFACT_DIGEST"
-          unzip -q "$WORK_DIR/artifact.zip" -d "$WORK_DIR/artifact"
+          for name in bridge-observation.json dossier.md intent.tf.json plan-receipt.json validation.json plan-oracle-v1.json; do
+            unzip -p "$WORK_DIR/artifact.zip" "$name" > "$WORK_DIR/artifact/$name"
+          done
 
           locate_artifact() {
             local name=$1
