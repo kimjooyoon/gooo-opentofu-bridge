@@ -1040,9 +1040,12 @@ def record_observation(publish_dir: Path, bindings_path: Path, denominator_path:
     unknown_claims = cases["missing_plan"].get("claims", []) + cases["stale_input"].get("claims", [])
     if not unknown_claims or any(claim.get("state") != "UNKNOWN" or not UNKNOWN_FIELDS.issubset(claim) or not isinstance(claim.get("blocked_by"), list) for claim in unknown_claims):
         die("missing-plan and stale-input cases do not preserve UNKNOWN coordinates")
-    refuted_case_ids = [case_id for case_id in case_ids if expected_case_state(case_matrix, case_id) == "REFUTED"]
+    refuted_case_ids = [case_id for case_id in case_ids if expected_case_state(case_matrix, case_id) == "REFUTED" and case_id != "precedence"]
     if any(not cases[case_id].get("claims") or not all(claim.get("state") == "REFUTED" for claim in cases[case_id]["claims"]) for case_id in refuted_case_ids):
         die("a REFUTED case is not fully REFUTED")
+    precedence_claims = cases.get("precedence", {}).get("claims", [])
+    if cases.get("precedence", {}).get("decision") != "FAIL_CLOSED" or not any(claim.get("state") == "REFUTED" for claim in precedence_claims) or not any(claim.get("state") == "UNKNOWN" for claim in precedence_claims) or not any(claim.get("state") == "CLOSED" for claim in precedence_claims):
+        die("REFUTED > UNKNOWN > CLOSED precedence is not preserved")
     if cases["malformed"].get("decision") != "FIXED_POINT" or not all(claim.get("state") == "FIXED_POINT" for claim in cases["malformed"].get("claims", [])):
         die("malformed plan case is not a FIXED_POINT")
     validation = read_json(validation_path)

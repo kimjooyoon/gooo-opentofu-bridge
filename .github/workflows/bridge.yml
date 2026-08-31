@@ -441,7 +441,8 @@ jobs:
             .cases.normal.decision=="CLOSED" and
             .cases.missing_plan.decision=="FAIL_CLOSED" and
             .cases.stale_input.decision=="FAIL_CLOSED" and
-            all([.cases.unexpected_create,.cases.unexpected_delete,.cases.engine_inference,.cases.unsupported_json,.cases.authority_escalation,.cases.precedence][];.decision=="FAIL_CLOSED" and all(.claims[];.state=="REFUTED")) and
+            all([.cases.unexpected_create,.cases.unexpected_delete,.cases.engine_inference,.cases.unsupported_json,.cases.authority_escalation][];.decision=="FAIL_CLOSED" and all(.claims[];.state=="REFUTED")) and
+            .cases.precedence.decision=="FAIL_CLOSED" and ([.cases.precedence.claims[].state]|sort)==["CLOSED","REFUTED","UNKNOWN"] and
             .cases.malformed.decision=="FIXED_POINT" and all(.cases.malformed.claims[];.state=="FIXED_POINT") and
             all([.cases.missing_plan,.cases.stale_input][].claims[]; .state=="UNKNOWN" and (.stage and .step and .reason and .unknown_class and .next_operation and (.blocked_by|type=="array"))) and
             .plan_match.state=="CLOSED" and
