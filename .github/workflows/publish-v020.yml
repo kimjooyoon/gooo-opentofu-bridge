@@ -1,0 +1,216 @@
+name: Publish immutable v0.2.0 evidence
+
+on:
+  push:
+    tags:
+      - release-v0.2.0-publish-1
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: publish-v0.2.0
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'kimjooyoon/gooo-opentofu-bridge'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: kimjooyoon/gooo-opentofu-bridge
+      VERSION_TAG: v0.2.0
+      TRIGGER_TAG: release-v0.2.0-publish-1
+      MAIN_SHA: 5444c1f9967ee42af05bf06094473e2950f6a366
+      SOURCE_RUN_ID: '33345178464'
+      ARTIFACT_ID: '9741768051'
+      ARTIFACT_NAME: gooo-opentofu-bridge-evidence-5444c1f9967ee42af05bf06094473e2950f6a366
+      ARTIFACT_SIZE: '108328'
+      ARTIFACT_DIGEST: sha256:851b60544d782f6d6a894664ab30ef2f5a85c7ca0734784b1995a97123620b76
+      WORK_DIR: /tmp/gooo-opentofu-bridge-release
+      RELEASE_DIR: /tmp/gooo-opentofu-bridge-release/payload
+      EVIDENCE_ZIP: gooo-opentofu-bridge-evidence-5444c1f9967ee42af05bf06094473e2950f6a366.zip
+
+    steps:
+      - name: Checkout the exact trigger commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Verify trigger, source run, and immutable evidence artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/tags/$TRIGGER_TAG"
+          test "$GITHUB_SHA" = "$MAIN_SHA"
+
+          resolve_tag() {
+            local tag=$1
+            local resolved
+            resolved=$(git ls-remote "https://github.com/$REPOSITORY.git" "refs/tags/$tag^{}" | awk 'NR==1{print $1}')
+            if [ -z "$resolved" ]; then
+              resolved=$(git ls-remote "https://github.com/$REPOSITORY.git" "refs/tags/$tag" | awk 'NR==1{print $1}')
+            fi
+            printf '%s' "$resolved"
+          }
+
+          test "$(resolve_tag "$TRIGGER_TAG")" = "$MAIN_SHA"
+          gh api "repos/$REPOSITORY/commits/$MAIN_SHA" --jq '.sha' | grep -Fx "$MAIN_SHA" >/dev/null
+
+          gh api "repos/$REPOSITORY/actions/runs/$SOURCE_RUN_ID" > "$WORK_DIR-source-run.json"
+          jq -e --argjson run "$SOURCE_RUN_ID" --arg sha "$MAIN_SHA" \
+            '.id==$run and .head_sha==$sha and .head_branch=="main" and .status=="completed" and .conclusion=="success"' \
+            "$WORK_DIR-source-run.json" >/dev/null
+
+          mkdir -p "$WORK_DIR/artifact" "$RELEASE_DIR"
+          gh api "repos/$REPOSITORY/actions/artifacts/$ARTIFACT_ID" > "$WORK_DIR/artifact-metadata.json"
+          jq -e --argjson artifact "$ARTIFACT_ID" --argjson run "$SOURCE_RUN_ID" \
+            --arg name "$ARTIFACT_NAME" --argjson size "$ARTIFACT_SIZE" --arg digest "$ARTIFACT_DIGEST" --arg sha "$MAIN_SHA" \
+            '.id==$artifact and .name==$name and .size_in_bytes==$size and .digest==$digest and .expired==false and .workflow_run.id==$run and .workflow_run.head_sha==$sha' \
+            "$WORK_DIR/artifact-metadata.json" >/dev/null
+          gh api -H 'Accept: application/zip' "repos/$REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$WORK_DIR/artifact.zip"
+          test "$(wc -c < "$WORK_DIR/artifact.zip" | tr -d ' ')" = "$ARTIFACT_SIZE"
+          test "sha256:$(sha256sum "$WORK_DIR/artifact.zip" | awk '{print $1}')" = "$ARTIFACT_DIGEST"
+          unzip -q "$WORK_DIR/artifact.zip" -d "$WORK_DIR/artifact"
+
+          locate_artifact() {
+            local name=$1
+            local path
+            path=$(find "$WORK_DIR/artifact" -type f -name "$name" -print -quit)
+            test -n "$path"
+            printf '%s' "$path"
+          }
+
+          bridge_observation=$(locate_artifact bridge-observation.json)
+          plan_receipt=$(locate_artifact plan-receipt.json)
+          validation=$(locate_artifact validation.json)
+          intent=$(locate_artifact intent.tf.json)
+          dossier=$(locate_artifact dossier.md)
+          oracle=$(locate_artifact plan-oracle-v1.json)
+          test "$(sha256sum "$bridge_observation" | awk '{print $1}')" = 1298c6d8d946402bf9bd5151c576f44f0b1774c508c03f46d3e1dfa89e02d711
+          test "$(sha256sum "$plan_receipt" | awk '{print $1}')" = 50f4f37e832bbd71e139205c9321aebee46db207137affa28e33401124d7450a
+          test "$(sha256sum "$validation" | awk '{print $1}')" = 885c62ce390bfc799f1ebb81277dd7a79a4ea3a421e82adede0fa35c88cfe041
+          test "$(sha256sum "$intent" | awk '{print $1}')" = 51270344c6bc13fceab1e7b9d9e27abf6e65860a3501163053274775328bdb73
+          test "$(sha256sum "$oracle" | awk '{print $1}')" = 5e3df015b069e18bb3151c7fb5266bf15c01ce76bcd51fd03993409c9f250e24
+          jq -e '.state=="CLOSED" and .authority.repository_writes==0 and .authority.opentofu_apply_executions==0 and .authority.opentofu_destroy_executions==0 and .authority.opentofu_cloud_accesses==0 and .authority.opentofu_runtime_network_access_claimed==false and .denominator.target_cells==12 and (.cases|length)==10' "$bridge_observation" >/dev/null
+          jq -e '.state=="CLOSED" and .iac_engine=="OPENTOFU" and .engine_identity_source=="PINNED_RELEASE_LOCK" and .engine_version=="1.12.6" and .binary_verified==true and .release.asset_verified==true and .release.checksums_verified==true and .command_verified==true and .read_only.apply==0 and .read_only.destroy==0' "$plan_receipt" >/dev/null
+          jq -e '.state=="CLOSED" and .official_opentofu.state=="CLOSED" and .official_opentofu.exit_code==0 and .official_opentofu.command==["tofu","validate","-json"]' "$validation" >/dev/null
+          jq -e '.resource_action_dependencies==[{"intent_entity":"bridge://opentofu/intent/hello/terraform-data","address":"terraform_data.hello","action":"create","depends_on":[]}]' "$oracle" >/dev/null
+
+          cp "$bridge_observation" "$RELEASE_DIR/bridge-observation.json"
+          cp "$dossier" "$RELEASE_DIR/dossier.md"
+          cp "$intent" "$RELEASE_DIR/intent.tf.json"
+          cp "$plan_receipt" "$RELEASE_DIR/plan-receipt.json"
+          cp "$validation" "$RELEASE_DIR/validation.json"
+          cp "$oracle" "$RELEASE_DIR/plan-oracle-v1.json"
+          (cd "$RELEASE_DIR" && zip -X -q "$EVIDENCE_ZIP" bridge-observation.json dossier.md intent.tf.json plan-receipt.json validation.json plan-oracle-v1.json)
+
+      - name: Enable and verify repository immutable releases
+        shell: bash
+        run: |
+          set -euo pipefail
+          immutable_endpoint="repos/$REPOSITORY/immutable-releases"
+          status=0
+          gh api -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2026-03-10' "$immutable_endpoint" > "$WORK_DIR/immutable.json" 2> "$WORK_DIR/immutable-get.stderr" || status=$?
+          if [ "$status" -ne 0 ]; then
+            put_status=0
+            gh api --method PUT -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2026-03-10' "$immutable_endpoint" > /dev/null 2> "$WORK_DIR/immutable-put.stderr" || put_status=$?
+            if [ "$put_status" -ne 0 ]; then
+              cat "$WORK_DIR/immutable-get.stderr" >&2
+              cat "$WORK_DIR/immutable-put.stderr" >&2
+              echo 'REFUTED: immutable releases are unavailable; no release was created.' >&2
+              exit 1
+            fi
+            gh api -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2026-03-10' "$immutable_endpoint" > "$WORK_DIR/immutable.json"
+          fi
+          jq -e '.enabled==true' "$WORK_DIR/immutable.json" >/dev/null
+
+      - name: Build deterministic release manifest and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          zip_sha=$(sha256sum "$RELEASE_DIR/$EVIDENCE_ZIP" | awk '{print $1}')
+          jq -S -n \
+            --arg repository "$REPOSITORY" \
+            --arg version "$VERSION_TAG" \
+            --arg main_sha "$MAIN_SHA" \
+            --arg trigger_tag "$TRIGGER_TAG" \
+            --argjson run_id "$SOURCE_RUN_ID" \
+            --arg run_url "https://github.com/$REPOSITORY/actions/runs/$SOURCE_RUN_ID" \
+            --argjson artifact_id "$ARTIFACT_ID" \
+            --arg artifact_name "$ARTIFACT_NAME" \
+            --argjson artifact_size "$ARTIFACT_SIZE" \
+            --arg artifact_digest "$ARTIFACT_DIGEST" \
+            --arg zip_name "$EVIDENCE_ZIP" \
+            --arg zip_sha "$zip_sha" \
+            --arg bridge_observation_sha "1298c6d8d946402bf9bd5151c576f44f0b1774c508c03f46d3e1dfa89e02d711" \
+            --arg generated_artifact_sha "51270344c6bc13fceab1e7b9d9e27abf6e65860a3501163053274775328bdb73" \
+            --arg plan_receipt_sha "50f4f37e832bbd71e139205c9321aebee46db207137affa28e33401124d7450a" \
+            --arg validation_sha "885c62ce390bfc799f1ebb81277dd7a79a4ea3a421e82adede0fa35c88cfe041" \
+            --arg oracle_sha "5e3df015b069e18bb3151c7fb5266bf15c01ce76bcd51fd03993409c9f250e24" \
+            '{schema:"gooo/opentofu-bridge/release-manifest/v1",version:$version,repository:$repository,main_sha:$main_sha,trigger_tag:$trigger_tag,source_run:{id:$run_id,url:$run_url,conclusion:"success"},workflow_artifact:{id:$artifact_id,name:$artifact_name,size_bytes:$artifact_size,digest:$artifact_digest},evidence:{zip:$zip_name,zip_sha256:$zip_sha,files:["bridge-observation.json","dossier.md","intent.tf.json","plan-receipt.json","validation.json","plan-oracle-v1.json"]},internal_receipts:{bridge_observation_sha256:$bridge_observation_sha,generated_artifact_sha256:$generated_artifact_sha,plan_receipt_sha256:$plan_receipt_sha,validation_sha256:$validation_sha,oracle_sha256:$oracle_sha},authority:{repository_writes:0,apply:0,destroy:0,cloud:0,network:0,source_write:0},release_immutable:true}' \
+            > "$RELEASE_DIR/release-manifest.json"
+          (cd "$RELEASE_DIR" && sha256sum release-manifest.json "$EVIDENCE_ZIP" > SHA256SUMS)
+          test "$(wc -l < "$RELEASE_DIR/SHA256SUMS" | tr -d ' ')" = 2
+
+      - name: Publish once or verify an existing immutable release
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_status=0
+          gh api "repos/$REPOSITORY/releases/tags/$VERSION_TAG" > "$WORK_DIR/release.json" 2> "$WORK_DIR/release-get.stderr" || release_status=$?
+          if [ "$release_status" -eq 0 ]; then
+            jq -e --arg tag "$VERSION_TAG" --arg sha "$MAIN_SHA" \
+              '.tag_name==$tag and .draft==false and .prerelease==false and .immutable==true' "$WORK_DIR/release.json" >/dev/null
+          elif grep -q 'HTTP 404' "$WORK_DIR/release-get.stderr"; then
+            gh release create "$VERSION_TAG" --repo "$REPOSITORY" --target "$MAIN_SHA" --title "v0.2.0 — pinned OpenTofu bridge evidence" --notes "Immutable release for main commit $MAIN_SHA. Post-merge GitHub Actions run: https://github.com/$REPOSITORY/actions/runs/$SOURCE_RUN_ID. The attached manifest records the workflow artifact, evidence digests, denominator, cases, measurements, and zero-side-effect authority." --latest \
+              "$RELEASE_DIR/release-manifest.json" "$RELEASE_DIR/SHA256SUMS" "$RELEASE_DIR/$EVIDENCE_ZIP"
+            gh api "repos/$REPOSITORY/releases/tags/$VERSION_TAG" > "$WORK_DIR/release.json"
+            jq -e --arg tag "$VERSION_TAG" '.tag_name==$tag and .draft==false and .prerelease==false and .immutable==true' "$WORK_DIR/release.json" >/dev/null
+          else
+            cat "$WORK_DIR/release-get.stderr" >&2
+            exit "$release_status"
+          fi
+
+          resolve_tag() {
+            local tag=$1
+            local resolved
+            resolved=$(git ls-remote "https://github.com/$REPOSITORY.git" "refs/tags/$tag^{}" | awk 'NR==1{print $1}')
+            if [ -z "$resolved" ]; then
+              resolved=$(git ls-remote "https://github.com/$REPOSITORY.git" "refs/tags/$tag" | awk 'NR==1{print $1}')
+            fi
+            printf '%s' "$resolved"
+          }
+          test "$(resolve_tag "$VERSION_TAG")" = "$MAIN_SHA"
+          jq -e --arg sha "$MAIN_SHA" '.target_commitish=="main" or .target_commitish==$sha' "$WORK_DIR/release.json" >/dev/null
+
+          expected_names=$(printf '%s\n' "$EVIDENCE_ZIP" SHA256SUMS release-manifest.json | sort)
+          actual_names=$(jq -r '.assets[].name' "$WORK_DIR/release.json" | sort)
+          test "$actual_names" = "$expected_names"
+          while IFS= read -r name; do
+            path="$RELEASE_DIR/$name"
+            expected_size=$(wc -c < "$path" | tr -d ' ')
+            expected_sha=$(sha256sum "$path" | awk '{print $1}')
+            asset_id=$(jq -r --arg name "$name" --argjson size "$expected_size" --arg digest "sha256:$expected_sha" '.assets[] | select(.name==$name and .size==$size and .digest==$digest and .state=="uploaded") | .id' "$WORK_DIR/release.json")
+            test -n "$asset_id"
+            gh api -H 'Accept: application/octet-stream' "repos/$REPOSITORY/releases/assets/$asset_id" > "$WORK_DIR/$name"
+            test "$(wc -c < "$WORK_DIR/$name" | tr -d ' ')" = "$expected_size"
+            test "$(sha256sum "$WORK_DIR/$name" | awk '{print $1}')" = "$expected_sha"
+          done <<EOF
+          $expected_names
+          EOF
+
+          release_url=$(jq -r '.html_url' "$WORK_DIR/release.json")
+          {
+            echo "## v0.2.0 publication"
+            echo
+            echo "- Release: $release_url"
+            echo "- Tag target: $MAIN_SHA"
+            echo "- Immutable: true"
+            echo "- Source run: https://github.com/$REPOSITORY/actions/runs/$SOURCE_RUN_ID"
+            echo "- Artifact: $ARTIFACT_NAME ($ARTIFACT_SIZE bytes, $ARTIFACT_DIGEST)"
+            echo "- Assets verified: $expected_names"
+            echo "- Authority: repository_writes=0, apply=0, destroy=0, cloud=0, network=0, source_write=0"
+          } >> "$GITHUB_STEP_SUMMARY"
