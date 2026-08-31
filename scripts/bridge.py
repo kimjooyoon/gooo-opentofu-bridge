@@ -389,6 +389,8 @@ def generate_plan_receipt(
         "binary_sha256": binary_sha256,
         "expected_binary_sha256": release.get("binary_sha256"),
         "binary_verified": binary_verified,
+        "release_asset_sha256": release_asset_sha256,
+        "checksums_asset_sha256": checksums_asset_sha256,
         "version_json_sha256": sha256_file(version_json_path),
         "version_json": version_json,
         "version_consistent_with_pinned_release": version_consistent,
@@ -402,6 +404,13 @@ def generate_plan_receipt(
         "release_lock_sha256": sha256_file(lock_path),
         "toolchain_sha256": toolchain_sha256,
         "toolchain": toolchain_manifest,
+        "inputs": {
+            "source_sha256": sha256_file(source_path),
+            "semantic_ir_sha256": sha256_file(graph_path),
+            "generated_config_sha256": sha256_file(artifact_path),
+            "json_spec_sha256": sha256_file(spec_path),
+            "release_lock_sha256": sha256_file(lock_path),
+        },
         "command": command,
         "command_sha256": canonical_sha256(command),
         "command_verified": command_valid,
@@ -536,6 +545,7 @@ def match_plan_to_intent(artifact_path: Path, plan_receipt_path: Path, oracle_pa
     current_artifact_sha = sha256_file(artifact_path)
     expected_actions = oracle["resource_actions"]
     actual_actions = receipt.get("resource_actions", [])
+    receipt_inputs = receipt.get("inputs") if isinstance(receipt.get("inputs"), dict) else {}
     claim: dict[str, Any]
     state = receipt.get("state")
     if state == "UNKNOWN":
@@ -564,7 +574,7 @@ def match_plan_to_intent(artifact_path: Path, plan_receipt_path: Path, oracle_pa
             "state": "REFUTED",
             **receipt_claim("REFUTED", "PLAN", "VERIFY_PLAN_RECEIPT", "UNRECOGNIZED_PLAN_RECEIPT_STATE", "CAPTURE_SUPPORTED_PLAN_RECEIPT"),
         }
-    elif receipt.get("input_artifact_sha256") != current_artifact_sha:
+    elif receipt.get("input_artifact_sha256") != current_artifact_sha or receipt_inputs.get("generated_config_sha256") != current_artifact_sha:
         claim = {
             "state": "UNKNOWN",
             **unknown_coordinates("PLAN", "MATCH_PLAN_TO_INTENT", "STALE_PLAN_INPUT_DIGEST", "DIRECT_MISSING", "REGENERATE_PLAN_FOR_CURRENT_ARTIFACT", []),
