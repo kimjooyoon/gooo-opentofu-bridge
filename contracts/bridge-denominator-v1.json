@@ -4,6 +4,19 @@
   "target_cells": 12,
   "expected_output_files": ["dossier.md", "intent.tf.json"],
   "expected_user_path_steps": 5,
+  "cross_project_required_gates": 0,
+  "case_matrix": [
+    {"case_id": "normal", "decision": "CLOSED"},
+    {"case_id": "missing_plan", "decision": "FAIL_CLOSED", "state": "UNKNOWN"},
+    {"case_id": "stale_input", "decision": "FAIL_CLOSED", "state": "UNKNOWN"},
+    {"case_id": "unexpected_create", "decision": "FAIL_CLOSED", "state": "REFUTED"},
+    {"case_id": "unexpected_delete", "decision": "FAIL_CLOSED", "state": "REFUTED"},
+    {"case_id": "engine_inference", "decision": "FAIL_CLOSED", "state": "REFUTED"},
+    {"case_id": "unsupported_json", "decision": "FAIL_CLOSED", "state": "REFUTED"},
+    {"case_id": "malformed", "decision": "FIXED_POINT", "state": "FIXED_POINT"},
+    {"case_id": "authority_escalation", "decision": "FAIL_CLOSED", "state": "REFUTED"},
+    {"case_id": "precedence", "decision": "FAIL_CLOSED", "state": "REFUTED"}
+  ],
   "cells": [
     {"ordinal": 1, "id": "INTENT_DECLARED", "activity": "DeclareGoooInfrastructureIntent", "stage": "INPUT", "step": "DECLARE_GOOO_INFRASTRUCTURE_INTENT", "proof_family": "FOUNDATION", "indicator": "DRIVER", "closed_reason": "GOOO_INFRASTRUCTURE_INTENT_DECLARED", "depends_on": []},
     {"ordinal": 2, "id": "GOOO_GRAPH_BOUND", "activity": "BindGoooIntentToOpenTofu", "stage": "META", "step": "BIND_RELEASED_GOOO_GRAPH", "proof_family": "FOUNDATION", "indicator": "DRIVER", "closed_reason": "RELEASED_GOOO_GRAPH_BOUND", "depends_on": ["INTENT_DECLARED"]},

@@ -216,6 +216,64 @@ def read_json_lines(path: Path) -> list[dict[str, Any]]:
     return messages
 
 
+def read_plan_stream(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Read plan JSON without turning an unavailable or malformed receipt into a process error."""
+    if not path.exists():
+        return [], {
+            "kind": "missing",
+            "reason": "PLAN_JSON_MISSING",
+            "detail": str(path),
+        }
+    try:
+        lines = read_text(path).splitlines()
+    except SystemExit:
+        return [], {
+            "kind": "missing",
+            "reason": "PLAN_JSON_UNREADABLE",
+            "detail": str(path),
+        }
+    messages: list[dict[str, Any]] = []
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as exc:
+            return messages, {
+                "kind": "malformed",
+                "reason": "MALFORMED_PLAN_JSON",
+                "detail": str(exc),
+                "line": line_number,
+            }
+        if not isinstance(value, dict):
+            return messages, {
+                "kind": "malformed",
+                "reason": "MALFORMED_PLAN_JSON_MESSAGE",
+                "detail": "plan JSON lines must be objects",
+                "line": line_number,
+            }
+        messages.append(value)
+    if not messages:
+        return [], {
+            "kind": "missing",
+            "reason": "PLAN_JSON_EMPTY",
+            "detail": str(path),
+        }
+    return messages, None
+
+
+def receipt_claim(state: str, stage: str, step: str, reason: str, next_operation: str | None = None) -> dict[str, Any]:
+    return {
+        "state": state,
+        "stage": stage,
+        "step": step,
+        "reason": reason,
+        "unknown_class": None,
+        "next_operation": next_operation,
+        "blocked_by": [],
+    }
+
+
 def load_plan_oracle(path: Path) -> dict[str, Any]:
     oracle = read_json(path)
     if oracle.get("schema") != "gooo/opentofu-bridge/plan-oracle/v1":
@@ -228,33 +286,135 @@ def load_plan_oracle(path: Path) -> dict[str, Any]:
         if not isinstance(action, dict) or set(action) != {"address", "action"} or action["action"] not in PLAN_ACTIONS:
             die("plan oracle action is invalid")
         normalized.append({"address": action["address"], "action": action["action"]})
+    dependencies = oracle.get("resource_action_dependencies")
+    if not isinstance(dependencies, list) or not dependencies:
+        die("plan oracle resource_action_dependencies is empty")
+    normalized_dependencies = []
+    for dependency in dependencies:
+        if (
+            not isinstance(dependency, dict)
+            or set(dependency) != {"intent_entity", "address", "action", "depends_on"}
+            or not isinstance(dependency["intent_entity"], str)
+            or not isinstance(dependency["address"], str)
+            or dependency["action"] not in PLAN_ACTIONS
+            or not isinstance(dependency["depends_on"], list)
+            or any(not isinstance(item, str) for item in dependency["depends_on"])
+        ):
+            die("plan oracle resource_action_dependencies entry is invalid")
+        normalized_dependencies.append(
+            {
+                "intent_entity": dependency["intent_entity"],
+                "address": dependency["address"],
+                "action": dependency["action"],
+                "depends_on": sorted(dependency["depends_on"]),
+            }
+        )
+    if sorted((item["address"], item["action"]) for item in normalized_dependencies) != sorted(
+        (item["address"], item["action"]) for item in normalized
+    ):
+        die("plan oracle resource/action dependencies do not match actions")
     if oracle.get("change_summary") != {"add": 1, "change": 0, "forget": 0, "import": 0, "operation": "plan", "remove": 0}:
         die("plan oracle summary is not fixed")
     if oracle.get("side_effects") != {"apply": 0, "cloud": 0, "network": 0, "source_write": 0}:
         die("plan oracle side-effect contract is not zero")
     oracle["resource_actions"] = sorted(normalized, key=lambda item: (item["address"], item["action"]))
+    oracle["resource_action_dependencies"] = sorted(
+        normalized_dependencies, key=lambda item: (item["address"], item["action"], item["intent_entity"])
+    )
     return oracle
 
 
-def generate_plan_receipt(plan_ui_path: Path, version_json_path: Path, binary_path: Path, artifact_path: Path, oracle_path: Path, lock_path: Path, exit_code: int, output: Path) -> None:
+def generate_plan_receipt(
+    plan_ui_path: Path,
+    version_json_path: Path,
+    binary_path: Path,
+    artifact_path: Path,
+    oracle_path: Path,
+    lock_path: Path,
+    source_path: Path,
+    graph_path: Path,
+    spec_path: Path,
+    toolchain_manifest_path: Path,
+    command_path: Path,
+    release_asset_path: Path,
+    checksums_asset_path: Path,
+    exit_code: int,
+    output: Path,
+) -> None:
     lock = read_json(lock_path)
     oracle = load_plan_oracle(oracle_path)
     version_json = read_json(version_json_path)
-    messages = read_json_lines(plan_ui_path)
     release = lock.get("opentofu", {})
-    ui_version = messages[0].get("ui")
+    command = read_json(command_path)
+    expected_command = release.get("plan_command")
+    command_valid = (
+        isinstance(command, dict)
+        and isinstance(command.get("argv"), list)
+        and command.get("argv") == expected_command
+        and command.get("working_directory") == "caller-owned-module"
+        and command.get("read_only") is True
+    )
+    binary_sha256 = sha256_file(binary_path)
+    release_asset_sha256 = sha256_file(release_asset_path)
+    checksums_asset_sha256 = sha256_file(checksums_asset_path)
+    version_consistent = (
+        isinstance(version_json, dict)
+        and version_json.get("terraform_version") == release.get("iac_engine_version")
+        and version_json.get("platform") == release.get("platform")
+    )
+    binary_verified = binary_sha256 == release.get("binary_sha256")
+    release_asset_verified = release_asset_sha256 == release.get("asset", {}).get("sha256")
+    checksums_asset_verified = checksums_asset_sha256 == release.get("checksums", {}).get("sha256")
+    toolchain_manifest = read_json(toolchain_manifest_path)
+    toolchain_sha256 = sha256_file(toolchain_manifest_path)
+    messages, stream_error = read_plan_stream(plan_ui_path)
+    ui_version = messages[0].get("ui") if messages else None
     receipt: dict[str, Any] = {
         "schema": "gooo/opentofu-bridge/plan-receipt/v1",
         "iac_engine": release.get("iac_engine"),
         "engine_identity_source": "PINNED_RELEASE_LOCK",
         "engine_version": release.get("iac_engine_version"),
-        "binary_sha256": sha256_file(binary_path),
+        "release": {
+            "repository": release.get("repository"),
+            "tag": release.get("tag"),
+            "release_id": release.get("release_id"),
+            "target_commit_sha": release.get("target_commit_sha"),
+            "asset_sha256": release_asset_sha256,
+            "expected_asset_sha256": release.get("asset", {}).get("sha256"),
+            "checksums_sha256": checksums_asset_sha256,
+            "expected_checksums_sha256": release.get("checksums", {}).get("sha256"),
+            "asset_verified": release_asset_verified,
+            "checksums_verified": checksums_asset_verified,
+        },
+        "binary_sha256": binary_sha256,
+        "expected_binary_sha256": release.get("binary_sha256"),
+        "binary_verified": binary_verified,
         "version_json_sha256": sha256_file(version_json_path),
         "version_json": version_json,
+        "version_consistent_with_pinned_release": version_consistent,
         "ui_version": ui_version,
         "exit_code": exit_code,
-        "stdout_sha256": sha256_file(plan_ui_path),
+        "stdout_sha256": sha256_file(plan_ui_path) if plan_ui_path.exists() else None,
         "input_artifact_sha256": sha256_file(artifact_path),
+        "source_sha256": sha256_file(source_path),
+        "semantic_ir_sha256": sha256_file(graph_path),
+        "json_spec_sha256": sha256_file(spec_path),
+        "release_lock_sha256": sha256_file(lock_path),
+        "toolchain_sha256": toolchain_sha256,
+        "toolchain": toolchain_manifest,
+        "command": command,
+        "command_sha256": canonical_sha256(command),
+        "command_verified": command_valid,
+        "read_only": {
+            "refresh": False,
+            "input": False,
+            "apply": 0,
+            "destroy": 0,
+            "cloud": 0,
+            "network": 0,
+            "source_write": 0,
+        },
+        "oracle_resource_action_dependencies": oracle["resource_action_dependencies"],
         "oracle_sha256": sha256_file(oracle_path),
         "resource_actions": [],
         "change_summary": None,
@@ -268,23 +428,67 @@ def generate_plan_receipt(plan_ui_path: Path, version_json_path: Path, binary_pa
             "CAPTURE_SUPPORTED_OPENTOFU_PLAN_JSON",
             [],
         ),
+        "fixed_point": None,
+        "refuted": None,
     }
 
-    if messages[0].get("type") != "version":
+    if not binary_verified or not release_asset_verified or not checksums_asset_verified:
+        receipt["state"] = "REFUTED"
+        receipt["unknown"] = None
+        receipt["refuted"] = receipt_claim(
+            "REFUTED", "ENGINE", "VERIFY_PINNED_RELEASE_DIGESTS", "PINNED_RELEASE_OR_BINARY_DIGEST_MISMATCH", "REACQUIRE_LOCKED_RELEASE_ASSETS"
+        )
+    elif release.get("iac_engine") != "OPENTOFU" or release.get("iac_engine_version") != "1.12.6":
+        receipt["state"] = "REFUTED"
+        receipt["unknown"] = None
+        receipt["refuted"] = receipt_claim(
+            "REFUTED", "ENGINE", "BIND_PLAN_ENGINE", "EXPLICIT_OPENTOFU_1_12_6_IDENTITY_MISSING", "PIN_EXPLICIT_OPENTOFU_RELEASE"
+        )
+    elif not version_consistent:
+        receipt["state"] = "REFUTED"
+        receipt["unknown"] = None
+        receipt["refuted"] = receipt_claim(
+            "REFUTED", "ENGINE", "VERIFY_VERSION_RECEIPT", "VERSION_JSON_MISMATCH_WITH_PINNED_RELEASE", "CAPTURE_PINNED_OPENTOFU_VERSION_JSON"
+        )
+    elif not command_valid:
+        receipt["state"] = "REFUTED"
+        receipt["unknown"] = None
+        receipt["refuted"] = receipt_claim(
+            "REFUTED", "AUTHORITY", "VERIFY_READ_ONLY_PLAN_COMMAND", "PLAN_COMMAND_IS_NOT_PINNED_READ_ONLY_JSON_PLAN", "EXECUTE_PINNED_READ_ONLY_PLAN_COMMAND"
+        )
+    elif stream_error and stream_error["kind"] == "missing":
         receipt["unknown"] = unknown_coordinates(
-            "PLAN", "READ_PINNED_JSON_UI", "PLAN_VERSION_MESSAGE_MISSING", "OBSERVATION_UNAVAILABLE", "CAPTURE_VERSION_JSON_UI_MESSAGE", []
+            "PLAN", "READ_PINNED_JSON_UI", stream_error["reason"], "OBSERVATION_UNAVAILABLE", "CAPTURE_PINNED_OPENTOFU_PLAN_JSON", []
+        )
+    elif stream_error and stream_error["kind"] == "malformed":
+        receipt["state"] = "FIXED_POINT"
+        receipt["unknown"] = None
+        receipt["fixed_point"] = {
+            "stage": "PLAN",
+            "step": "PARSE_PLAN_JSON",
+            "reason": stream_error["reason"],
+            "line": stream_error.get("line"),
+            "detail": stream_error.get("detail"),
+            "next_operation": "REPAIR_PLAN_JSON_STREAM",
+            "blocked_by": [],
+        }
+    elif not messages or messages[0].get("type") != "version":
+        receipt["state"] = "REFUTED"
+        receipt["unknown"] = None
+        receipt["refuted"] = receipt_claim(
+            "REFUTED", "PLAN", "READ_PINNED_JSON_UI", "PLAN_VERSION_MESSAGE_MISSING", "CAPTURE_VERSION_JSON_UI_MESSAGE"
         )
     elif not isinstance(ui_version, str) or ui_version.split(".", 1)[0] != "1":
-        receipt["unknown"] = unknown_coordinates(
-            "PLAN", "READ_PINNED_JSON_UI", "UNSUPPORTED_JSON_UI_MAJOR", "OBSERVATION_UNAVAILABLE", "PIN_OR_SUPPORT_JSON_UI_MAJOR", []
-        )
-    elif release.get("iac_engine") != "OPENTOFU" or not release.get("iac_engine_version"):
-        receipt["unknown"] = unknown_coordinates(
-            "ENGINE", "BIND_PLAN_ENGINE", "ENGINE_IDENTITY_REQUIRES_PINNED_RELEASE", "DIRECT_MISSING", "PROVIDE_EXPLICIT_OPENTOFU_RELEASE_ID", []
+        receipt["state"] = "REFUTED"
+        receipt["unknown"] = None
+        receipt["refuted"] = receipt_claim(
+            "REFUTED", "PLAN", "READ_PINNED_JSON_UI", "UNSUPPORTED_JSON_UI_MAJOR", "PIN_OR_SUPPORT_JSON_UI_MAJOR"
         )
     elif exit_code not in (0, 2):
-        receipt["unknown"] = unknown_coordinates(
-            "PLAN", "READ_PLAN_EXIT_CODE", "PLAN_NONZERO_WITHOUT_SUCCESS_EXIT_CODE", "OBSERVATION_UNAVAILABLE", "CAPTURE_SUCCESSFUL_PLAN_RECEIPT", []
+        receipt["state"] = "REFUTED"
+        receipt["unknown"] = None
+        receipt["refuted"] = receipt_claim(
+            "REFUTED", "PLAN", "READ_PLAN_EXIT_CODE", "PLAN_EXIT_CODE_NOT_0_OR_2", "CAPTURE_SUCCESSFUL_PLAN_RECEIPT"
         )
     else:
         actions: list[dict[str, str]] = []
@@ -298,8 +502,10 @@ def generate_plan_receipt(plan_ui_path: Path, version_json_path: Path, binary_pa
                 action = change.get("action") if isinstance(change, dict) else None
                 address = resource.get("addr") if isinstance(resource, dict) else None
                 if not isinstance(address, str) or action not in PLAN_ACTIONS:
-                    receipt["unknown"] = unknown_coordinates(
-                        "PLAN", "READ_PLANNED_CHANGE", "UNSUPPORTED_PLANNED_CHANGE_SHAPE", "OBSERVATION_UNAVAILABLE", "PIN_SUPPORTED_PLAN_UI_SCHEMA", []
+                    receipt["state"] = "REFUTED"
+                    receipt["unknown"] = None
+                    receipt["refuted"] = receipt_claim(
+                        "REFUTED", "PLAN", "READ_PLANNED_CHANGE", "UNSUPPORTED_PLANNED_CHANGE_SHAPE", "PIN_SUPPORTED_PLAN_UI_SCHEMA"
                     )
                     break
                 actions.append({"address": address, "action": action})
@@ -308,11 +514,18 @@ def generate_plan_receipt(plan_ui_path: Path, version_json_path: Path, binary_pa
             elif message_type == "change_summary":
                 summary = message.get("changes")
         else:
-            receipt["resource_actions"] = sorted(actions, key=lambda item: (item["address"], item["action"]))
-            receipt["change_summary"] = summary
-            receipt["drift_count"] = drift_count
-            receipt["state"] = "CLOSED"
-            receipt["unknown"] = None
+            if not isinstance(summary, dict):
+                receipt["state"] = "REFUTED"
+                receipt["unknown"] = None
+                receipt["refuted"] = receipt_claim(
+                    "REFUTED", "PLAN", "READ_CHANGE_SUMMARY", "PLAN_CHANGE_SUMMARY_MISSING", "CAPTURE_COMPLETE_PLAN_JSON"
+                )
+            else:
+                receipt["resource_actions"] = sorted(actions, key=lambda item: (item["address"], item["action"]))
+                receipt["change_summary"] = summary
+                receipt["drift_count"] = drift_count
+                receipt["state"] = "CLOSED"
+                receipt["unknown"] = None
 
     write_json(output, receipt)
 
@@ -325,11 +538,32 @@ def match_plan_to_intent(artifact_path: Path, plan_receipt_path: Path, oracle_pa
     actual_actions = receipt.get("resource_actions", [])
     claim: dict[str, Any]
     state = receipt.get("state")
-    if state != "CLOSED":
+    if state == "UNKNOWN":
         coordinates = receipt.get("unknown")
         if not isinstance(coordinates, dict) or set(coordinates) != UNKNOWN_FIELDS or not isinstance(coordinates.get("blocked_by"), list):
             coordinates = unknown_coordinates("PLAN", "MATCH_PLAN_TO_INTENT", "PLAN_RECEIPT_UNKNOWN_COORDINATES_MISSING", "DIRECT_MISSING", "CAPTURE_COMPLETE_PLAN_RECEIPT", [])
         claim = {"state": "UNKNOWN", **coordinates}
+    elif state == "FIXED_POINT":
+        fixed_point = receipt.get("fixed_point")
+        if not isinstance(fixed_point, dict):
+            fixed_point = {
+                "stage": "PLAN",
+                "step": "PARSE_PLAN_JSON",
+                "reason": "PLAN_FIXED_POINT_COORDINATES_MISSING",
+                "next_operation": "REPAIR_PLAN_JSON_STREAM",
+                "blocked_by": [],
+            }
+        claim = {"state": "FIXED_POINT", **fixed_point, "unknown_class": None}
+    elif state == "REFUTED":
+        refuted = receipt.get("refuted")
+        if not isinstance(refuted, dict):
+            refuted = receipt_claim("REFUTED", "PLAN", "VERIFY_PLAN_RECEIPT", "PLAN_RECEIPT_REFUTED", "REPAIR_PLAN_RECEIPT")
+        claim = {"state": "REFUTED", **refuted}
+    elif state != "CLOSED":
+        claim = {
+            "state": "REFUTED",
+            **receipt_claim("REFUTED", "PLAN", "VERIFY_PLAN_RECEIPT", "UNRECOGNIZED_PLAN_RECEIPT_STATE", "CAPTURE_SUPPORTED_PLAN_RECEIPT"),
+        }
     elif receipt.get("input_artifact_sha256") != current_artifact_sha:
         claim = {
             "state": "UNKNOWN",
@@ -337,8 +571,31 @@ def match_plan_to_intent(artifact_path: Path, plan_receipt_path: Path, oracle_pa
         }
     elif receipt.get("iac_engine") != "OPENTOFU" or receipt.get("engine_identity_source") != "PINNED_RELEASE_LOCK":
         claim = {
-            "state": "UNKNOWN",
-            **unknown_coordinates("ENGINE", "MATCH_PLAN_ENGINE", "ENGINE_INFERRED_FROM_COMPATIBILITY_FIELD", "DIRECT_MISSING", "CAPTURE_EXPLICIT_ENGINE_RECEIPT", []),
+            "state": "REFUTED",
+            **receipt_claim("REFUTED", "ENGINE", "MATCH_PLAN_ENGINE", "ENGINE_INFERRED_FROM_COMPATIBILITY_FIELD", "CAPTURE_EXPLICIT_ENGINE_RECEIPT"),
+        }
+    elif receipt.get("binary_verified") is not True or receipt.get("release", {}).get("asset_verified") is not True or receipt.get("version_consistent_with_pinned_release") is not True:
+        claim = {
+            "state": "REFUTED",
+            **receipt_claim("REFUTED", "ENGINE", "VERIFY_PLAN_TOOLCHAIN", "PLAN_TOOLCHAIN_DIGEST_OR_VERSION_NOT_VERIFIED", "RECAPTURE_PINNED_TOOLCHAIN_RECEIPT"),
+        }
+    elif receipt.get("command_verified") is not True or receipt.get("read_only") != {
+        "refresh": False,
+        "input": False,
+        "apply": 0,
+        "destroy": 0,
+        "cloud": 0,
+        "network": 0,
+        "source_write": 0,
+    }:
+        claim = {
+            "state": "REFUTED",
+            **receipt_claim("REFUTED", "AUTHORITY", "MATCH_READ_ONLY_PLAN", "READ_ONLY_PLAN_AUTHORITY_ESCALATION", "EXECUTE_ONLY_PINNED_READ_ONLY_PLAN"),
+        }
+    elif receipt.get("oracle_resource_action_dependencies") != oracle.get("resource_action_dependencies"):
+        claim = {
+            "state": "REFUTED",
+            **receipt_claim("REFUTED", "PLAN", "MATCH_RESOURCE_ACTION_DEPENDENCIES", "PLAN_DEPENDENCY_CONTRADICTION", "REGENERATE_PLAN_RECEIPT_FROM_CURRENT_ORACLE"),
         }
     elif receipt.get("drift_count") != 0:
         claim = {
@@ -493,7 +750,27 @@ Repository writes are zero after the caller-owned output is published.
     (output_dir / "dossier.md").write_text(dossier, encoding="utf-8")
 
 
-def validate_bridge_artifact(artifact_path: Path, dossier_path: Path, lock_path: Path, spec_path: Path, bindings_path: Path, denominator_path: Path, output: Path, tofu_result: Path | None, tofu_state: str | None, tofu_reason: str | None) -> None:
+def validate_bridge_artifact(
+    artifact_path: Path,
+    dossier_path: Path,
+    lock_path: Path,
+    spec_path: Path,
+    bindings_path: Path,
+    denominator_path: Path,
+    output: Path,
+    tofu_result: Path | None,
+    tofu_state: str | None,
+    tofu_reason: str | None,
+    source_path: Path,
+    graph_path: Path,
+    toolchain_manifest_path: Path,
+    command_path: Path,
+    binary_path: Path,
+    release_asset_path: Path,
+    checksums_asset_path: Path,
+    version_json_path: Path,
+    exit_code: int,
+) -> None:
     lock = read_json(lock_path)
     denominator = read_json(denominator_path)
     bindings = check_bindings(bindings_path, denominator)
@@ -508,16 +785,50 @@ def validate_bridge_artifact(artifact_path: Path, dossier_path: Path, lock_path:
         die("generated output file set is not exact")
 
     official: dict[str, Any]
+    command = read_json(command_path)
+    release = lock["opentofu"]
+    binary_sha256 = sha256_file(binary_path)
+    release_asset_sha256 = sha256_file(release_asset_path)
+    checksums_asset_sha256 = sha256_file(checksums_asset_path)
+    version_json = read_json(version_json_path)
+    toolchain_sha256 = sha256_file(toolchain_manifest_path)
+    command_valid = (
+        isinstance(command, dict)
+        and command.get("argv") == release.get("validate_command")
+        and command.get("working_directory") == "caller-owned-module"
+        and command.get("read_only") is True
+    )
+    identity_valid = (
+        release.get("iac_engine") == "OPENTOFU"
+        and release.get("iac_engine_version") == "1.12.6"
+        and binary_sha256 == release.get("binary_sha256")
+        and release_asset_sha256 == release.get("asset", {}).get("sha256")
+        and checksums_asset_sha256 == release.get("checksums", {}).get("sha256")
+        and isinstance(version_json, dict)
+        and version_json.get("terraform_version") == release.get("iac_engine_version")
+        and version_json.get("platform") == release.get("platform")
+        and command_valid
+    )
+    if not identity_valid:
+        die("official OpenTofu validation identity is not pinned and verified")
     if tofu_result is not None:
         result = read_json(tofu_result)
-        if result.get("valid") is not True or result.get("error_count") not in (0, None):
+        if exit_code != 0 or result.get("valid") is not True or result.get("error_count") not in (0, None):
             die("official OpenTofu validation did not close")
         official = {
             "state": "CLOSED",
             "command": ["tofu", "validate", "-json"],
+            "command_sha256": canonical_sha256(command),
             "valid": True,
             "error_count": int(result.get("error_count", 0)),
+            "exit_code": exit_code,
             "result_sha256": sha256_file(tofu_result),
+            "source_sha256": sha256_file(source_path),
+            "semantic_ir_sha256": sha256_file(graph_path),
+            "artifact_sha256": sha256_file(artifact_path),
+            "toolchain_sha256": toolchain_sha256,
+            "binary_sha256": binary_sha256,
+            "release_asset_sha256": release_asset_sha256,
         }
     else:
         official = {
@@ -525,10 +836,17 @@ def validate_bridge_artifact(artifact_path: Path, dossier_path: Path, lock_path:
             "command": ["tofu", "validate", "-json"],
             "valid": None,
             "error_count": None,
+            "exit_code": exit_code,
             "reason": tofu_reason or "OPENTOFU_VALIDATION_NOT_EXECUTED",
             "unknown_class": "EXECUTION_UNAVAILABLE",
             "next_operation": "EXECUTE_PINNED_OPENTOFU_VALIDATE",
             "blocked_by": [],
+            "source_sha256": sha256_file(source_path),
+            "semantic_ir_sha256": sha256_file(graph_path),
+            "artifact_sha256": sha256_file(artifact_path),
+            "toolchain_sha256": toolchain_sha256,
+            "binary_sha256": binary_sha256,
+            "release_asset_sha256": release_asset_sha256,
         }
     write_json(
         output,
@@ -540,6 +858,9 @@ def validate_bridge_artifact(artifact_path: Path, dossier_path: Path, lock_path:
             "artifact_sha256": sha256_file(artifact_path),
             "dossier_sha256": sha256_file(dossier_path),
             "json_spec_sha256": spec_digest,
+            "source_sha256": sha256_file(source_path),
+            "semantic_ir_sha256": sha256_file(graph_path),
+            "toolchain_sha256": toolchain_sha256,
             "structural_checks": {
                 "artifact_is_deterministic_projection": True,
                 "output_file_count": 2,
@@ -630,6 +951,14 @@ def check_int(value: Any, field: str) -> int:
     return value
 
 
+def expected_case_state(case_matrix: list[dict[str, Any]], case_id: str) -> str | None:
+    for case in case_matrix:
+        if case.get("case_id") == case_id:
+            value = case.get("state")
+            return value if isinstance(value, str) else None
+    return None
+
+
 def record_observation(publish_dir: Path, bindings_path: Path, denominator_path: Path, lock_path: Path, source: Path, graph_path: Path, validation_path: Path, replay_path: Path, plan_receipt_path: Path, plan_match_path: Path, oracle_path: Path, version_json_path: Path, cases_dir: Path, measurements_path: Path, line_metrics_path: Path, output: Path) -> None:
     denominator = read_json(denominator_path)
     bindings = check_bindings(bindings_path, denominator)
@@ -647,6 +976,8 @@ def record_observation(publish_dir: Path, bindings_path: Path, denominator_path:
         die("OpenTofu plan receipt and intent match must be CLOSED")
     if plan_receipt.get("iac_engine") != "OPENTOFU" or plan_receipt.get("engine_identity_source") != "PINNED_RELEASE_LOCK":
         die("plan engine identity is not explicit")
+    if plan_receipt.get("oracle_resource_action_dependencies") != oracle["resource_action_dependencies"]:
+        die("plan receipt dependency oracle is not linked")
     if plan_match.get("expected_resource_actions") != oracle["resource_actions"] or plan_match.get("observed_resource_actions") != oracle["resource_actions"]:
         die("plan resource/action oracle did not close")
     if plan_receipt.get("drift_count") != 0:
@@ -659,9 +990,11 @@ def record_observation(publish_dir: Path, bindings_path: Path, denominator_path:
         measurement["activity_id"] = known_activities[measurement["activity"]]
         measurement["cell_id"] = cell_by_activity[measurement["activity"]]["id"]
         check_int(measurement.get("wall_ms", 0), "wall_ms")
+        check_int(measurement.get("wall_ns", 0), "wall_ns")
         check_int(measurement.get("peak_rss_kib", 0), "peak_rss_kib")
         check_int(measurement.get("executions", 0), "executions")
         check_int(measurement.get("reused", 0), "reused")
+        check_int(measurement.get("skipped", 0), "skipped")
     for metric in line_metrics:
         if metric.get("activity") not in known_activities:
             die(f"line metric is not linked to a released Gooo activity: {metric}")
@@ -678,16 +1011,30 @@ def record_observation(publish_dir: Path, bindings_path: Path, denominator_path:
     actual = sorted(path.name for path in publish_dir.iterdir() if path.is_file())
     if actual != expected:
         die(f"published output set mismatch: {actual}")
-    cases = {name: read_json(cases_dir / f"{name}.json") for name in ("normal", "unknown", "refuted")}
+    case_matrix = denominator.get("case_matrix")
+    if not isinstance(case_matrix, list) or not case_matrix:
+        die("denominator case matrix is missing")
+    case_ids = [case.get("case_id") for case in case_matrix]
+    if any(not isinstance(case_id, str) for case_id in case_ids) or len(set(case_ids)) != len(case_ids):
+        die("denominator case IDs are not unique")
+    cases = {case_id: read_json(cases_dir / f"{case_id}.json") for case_id in case_ids}
+    for expected_case in case_matrix:
+        actual_case = cases[expected_case["case_id"]]
+        if actual_case.get("decision") != expected_case.get("decision"):
+            die(f"case decision mismatch: {expected_case['case_id']}")
+        expected_state = expected_case.get("state")
+        if expected_state and not any(claim.get("state") == expected_state for claim in actual_case.get("claims", [])):
+            die(f"case state mismatch: {expected_case['case_id']}")
     if cases["normal"].get("decision") != "CLOSED":
         die("normal case is not CLOSED")
-    unknown_claims = cases["unknown"].get("claims", [])
-    if cases["unknown"].get("decision") != "FAIL_CLOSED" or sorted(claim.get("unknown_class") for claim in unknown_claims) != ["DIRECT_MISSING", "DIRECT_MISSING", "OBSERVATION_UNAVAILABLE"]:
-        die("unknown case does not preserve stale, inferred-engine, and unsupported-JSON claims")
-    if any(set(claim) < UNKNOWN_FIELDS or not isinstance(claim.get("blocked_by"), list) for claim in unknown_claims):
-        die("unknown claim coordinates are incomplete")
-    if cases["refuted"].get("decision") != "FAIL_CLOSED" or not cases["refuted"].get("claims") or not all(claim.get("state") == "REFUTED" for claim in cases["refuted"]["claims"]):
-        die("refuted case is not REFUTED")
+    unknown_claims = cases["missing_plan"].get("claims", []) + cases["stale_input"].get("claims", [])
+    if not unknown_claims or any(claim.get("state") != "UNKNOWN" or not UNKNOWN_FIELDS.issubset(claim) or not isinstance(claim.get("blocked_by"), list) for claim in unknown_claims):
+        die("missing-plan and stale-input cases do not preserve UNKNOWN coordinates")
+    refuted_case_ids = [case_id for case_id in case_ids if expected_case_state(case_matrix, case_id) == "REFUTED"]
+    if any(not cases[case_id].get("claims") or not all(claim.get("state") == "REFUTED" for claim in cases[case_id]["claims"]) for case_id in refuted_case_ids):
+        die("a REFUTED case is not fully REFUTED")
+    if cases["malformed"].get("decision") != "FIXED_POINT" or not all(claim.get("state") == "FIXED_POINT" for claim in cases["malformed"].get("claims", [])):
+        die("malformed plan case is not a FIXED_POINT")
     validation = read_json(validation_path)
     replay = read_json(replay_path)
     output_digests = {name: sha256_file(publish_dir / name) for name in expected}
@@ -725,8 +1072,11 @@ def record_observation(publish_dir: Path, bindings_path: Path, denominator_path:
         linked_metric("reused_verification_stages", stage_reused, "stage-reuses", "PreserveReadOnlyBoundary", "bridge-observation.json"),
         linked_metric("resource_action_count", plan_match["resource_action_count"], "resource-actions", "MatchGoooIntentToOpenTofuPlan", "plan-match.json"),
         linked_metric("build_wall_ms", build_measurement.get("wall_ms", 0), "ms", "GenerateOpenTofuCompatibleArtifact", "bridge-observation.json"),
+        linked_metric("build_wall_ns", build_measurement.get("wall_ns", 0), "ns", "GenerateOpenTofuCompatibleArtifact", "bridge-observation.json"),
         linked_metric("test_wall_ms", test_measurement.get("wall_ms", 0), "ms", "PreserveReadOnlyBoundary", "bridge-observation.json"),
+        linked_metric("test_wall_ns", test_measurement.get("wall_ns", 0), "ns", "PreserveReadOnlyBoundary", "bridge-observation.json"),
         linked_metric("conformance_wall_ms", conformance_measurement.get("wall_ms", 0), "ms", "MatchGoooIntentToOpenTofuPlan", "bridge-observation.json"),
+        linked_metric("conformance_wall_ns", conformance_measurement.get("wall_ns", 0), "ns", "MatchGoooIntentToOpenTofuPlan", "bridge-observation.json"),
         linked_metric("peak_rss_kib", max((item.get("peak_rss_kib", 0) for item in measurement_doc), default=0), "KiB", "PreserveReadOnlyBoundary", "bridge-observation.json"),
         linked_metric("executed_test_count", test_measurement.get("executed_test_count", 0), "tests", "PreserveReadOnlyBoundary", "bridge-observation.json"),
         linked_metric("reused_test_evidence_count", test_measurement.get("reused_test_evidence_count", 0), "tests", "VerifyDeterministicReplay", "bridge-observation.json"),
@@ -734,6 +1084,7 @@ def record_observation(publish_dir: Path, bindings_path: Path, denominator_path:
         linked_metric("artifact_files", len(expected), "files", "GenerateOpenTofuCompatibleArtifact", "bridge-observation.json"),
         linked_metric("artifact_bytes", artifact_bytes, "bytes", "GenerateOpenTofuCompatibleArtifact", "bridge-observation.json"),
         linked_metric("repository_writes", 0, "writes", "PreserveReadOnlyBoundary", "bridge-observation.json"),
+        linked_metric("cross_project_required_gates", denominator.get("cross_project_required_gates", 0), "gates", "PreserveReadOnlyBoundary", "bridge-observation.json"),
         *line_metrics,
     ]
     primary_metrics = [
@@ -795,6 +1146,22 @@ def record_observation(publish_dir: Path, bindings_path: Path, denominator_path:
                 "opentofu_json_spec_sha256": lock["opentofu"]["json_spec"]["sha256"],
             },
             "authority": lock["authority"],
+            "case_matrix": case_matrix,
+            "comparative_claims": {
+                "improvement": {
+                    "state": "UNKNOWN",
+                    **unknown_coordinates("MEASUREMENT", "COMPARE_BEFORE_AFTER", "EXACT_BEFORE_AFTER_NOT_PROVIDED", "DIRECT_MISSING", "PROVIDE_EXACT_BEFORE_AFTER_BASELINE", []),
+                },
+                "utility": {
+                    "state": "UNKNOWN",
+                    **unknown_coordinates("MEASUREMENT", "ASSESS_INDEPENDENT_USER_UTILITY", "INDEPENDENT_USER_EVIDENCE_NOT_PROVIDED", "DIRECT_MISSING", "COLLECT_INDEPENDENT_USER_EVIDENCE", []),
+                },
+            },
+            "evaluator": {
+                "path": "scripts/evaluator.py",
+                "sha256": sha256_file(Path(__file__).with_name("evaluator.py")),
+                "independent": True,
+            },
         },
     )
 
@@ -817,13 +1184,32 @@ def parser() -> argparse.ArgumentParser:
     validate = sub.add_parser("validate")
     for name in ("artifact", "dossier", "lock", "spec", "bindings", "denominator", "output"):
         validate.add_argument(f"--{name}", type=Path, required=True)
+    for name in ("source", "graph", "toolchain-manifest", "binary", "release-asset", "checksums-asset", "version-json"):
+        validate.add_argument(f"--{name}", type=Path, required=True)
+    validate.add_argument("--command", dest="command_path", type=Path, required=True)
     validate.add_argument("--tofu-result", type=Path)
     validate.add_argument("--tofu-state", choices=("UNKNOWN",))
     validate.add_argument("--tofu-reason")
+    validate.add_argument("--exit-code", type=int, required=True)
 
     plan_receipt = sub.add_parser("plan-receipt")
-    for name in ("plan-ui", "version-json", "binary", "artifact", "oracle", "lock", "output"):
+    for name in (
+        "plan-ui",
+        "version-json",
+        "binary",
+        "artifact",
+        "oracle",
+        "lock",
+        "source",
+        "graph",
+        "spec",
+        "toolchain-manifest",
+        "release-asset",
+        "checksums-asset",
+        "output",
+    ):
         plan_receipt.add_argument(f"--{name}", type=Path, required=True)
+    plan_receipt.add_argument("--command", dest="command_path", type=Path, required=True)
     plan_receipt.add_argument("--exit-code", type=int, required=True)
 
     plan_match = sub.add_parser("match-plan")
@@ -852,9 +1238,45 @@ def main() -> None:
     elif args.command == "generate":
         generate_outputs(args.source, args.graph, args.lock, args.spec, args.bindings, args.denominator, args.output_dir)
     elif args.command == "validate":
-        validate_bridge_artifact(args.artifact, args.dossier, args.lock, args.spec, args.bindings, args.denominator, args.output, args.tofu_result, args.tofu_state, args.tofu_reason)
+        validate_bridge_artifact(
+            args.artifact,
+            args.dossier,
+            args.lock,
+            args.spec,
+            args.bindings,
+            args.denominator,
+            args.output,
+            args.tofu_result,
+            args.tofu_state,
+            args.tofu_reason,
+            args.source,
+            args.graph,
+            args.toolchain_manifest,
+            args.command_path,
+            args.binary,
+            args.release_asset,
+            args.checksums_asset,
+            args.version_json,
+            args.exit_code,
+        )
     elif args.command == "plan-receipt":
-        generate_plan_receipt(args.plan_ui, args.version_json, args.binary, args.artifact, args.oracle, args.lock, args.exit_code, args.output)
+        generate_plan_receipt(
+            args.plan_ui,
+            args.version_json,
+            args.binary,
+            args.artifact,
+            args.oracle,
+            args.lock,
+            args.source,
+            args.graph,
+            args.spec,
+            args.toolchain_manifest,
+            args.command_path,
+            args.release_asset,
+            args.checksums_asset,
+            args.exit_code,
+            args.output,
+        )
     elif args.command == "match-plan":
         match_plan_to_intent(args.artifact, args.plan_receipt, args.oracle, args.output)
     elif args.command == "evaluate":

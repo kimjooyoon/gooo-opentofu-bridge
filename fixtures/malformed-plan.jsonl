@@ -1,0 +1,2 @@
+{"type":"version","ui":"1.2"}
+{"type":"planned_change","change":{"resource":{"addr":"terraform_data.hello"},"action":"create"}

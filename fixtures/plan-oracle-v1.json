@@ -7,6 +7,14 @@
       "action": "create"
     }
   ],
+  "resource_action_dependencies": [
+    {
+      "intent_entity": "bridge://opentofu/intent/hello/terraform-data",
+      "address": "terraform_data.hello",
+      "action": "create",
+      "depends_on": []
+    }
+  ],
   "change_summary": {
     "add": 1,
     "change": 0,
