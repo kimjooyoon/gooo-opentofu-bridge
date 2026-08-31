@@ -222,6 +222,9 @@ jobs:
           end_ns=$(date +%s%N)
           echo $(( (end_ns-start_ns+999999)/1000000 )) > "$WORK_DIR/plan-wall-ms"
           test "$plan_status" -eq 0 -o "$plan_status" -eq 2
+          plan_rss_kib=$(tail -n 1 "$WORK_DIR/plan-rss-kib")
+          printf '%s\n' "$plan_rss_kib" > "$WORK_DIR/plan-rss-kib"
+          test "$plan_rss_kib" -ge 0
           match_start_ns=$(date +%s%N)
           python3 scripts/bridge.py plan-receipt \
             --plan-ui "$WORK_DIR/tofu-plan.jsonl" \
