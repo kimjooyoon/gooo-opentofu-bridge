@@ -243,12 +243,6 @@ jobs:
           match_end_ns=$(date +%s%N)
           echo $(( (match_end_ns-match_start_ns+999999)/1000000 )) > "$WORK_DIR/match-wall-ms"
           printf '%s\n' "$(cat "$WORK_DIR/plan-rss-kib")" > "$WORK_DIR/match-rss-kib"
-          echo '--- plan receipt ---'
-          jq . "$WORK_DIR/plan-receipt.json"
-          echo '--- plan match ---'
-          jq . "$WORK_DIR/plan-match.json"
-          echo '--- raw plan JSONL ---'
-          sed -n '1,40p' "$WORK_DIR/tofu-plan.jsonl"
           jq -e '.state=="CLOSED" and .iac_engine=="OPENTOFU" and .engine_identity_source=="PINNED_RELEASE_LOCK" and .exit_code==2 and .drift_count==0 and (.resource_actions|sort_by(.address,.action))==[{"address":"terraform_data.hello","action":"create"}]' "$WORK_DIR/plan-receipt.json" >/dev/null
           jq -e '.state=="CLOSED" and .claim.state=="CLOSED" and .expected_resource_actions==[{"address":"terraform_data.hello","action":"create"}] and .observed_resource_actions==[{"address":"terraform_data.hello","action":"create"}]' "$WORK_DIR/plan-match.json" >/dev/null
 
@@ -308,8 +302,6 @@ jobs:
           python_lines=$(find . -path './.git' -prune -o -type f -name '*.py' -print0 | xargs -0 awk 'END {print NR+0}')
           python_lines=${python_lines:-0}
           workflow_lines=$(lines_for .github/workflows/bridge.yml)
-          printf 'line inputs: dirs=%q files=%q go_files=%q go_lines=%q gooo_files=%q physical=%q gooo=%q python=%q workflow=%q\n' \
-            "$descendant_dirs" "$regular_files" "$go_files" "$go_lines" "$gooo_files" "$physical_lines" "$gooo_lines" "$python_lines" "$workflow_lines"
           jq -S -n \
             --argjson dirs "$descendant_dirs" \
             --argjson files "$regular_files" \
@@ -331,16 +323,6 @@ jobs:
               {name:"python_physical_lines",value:$python,unit:"lines",activity:"GenerateOpenTofuCompatibleArtifact"},
               {name:"workflow_physical_lines",value:$workflow,unit:"lines",activity:"PreserveReadOnlyBoundary"}
             ]' > "$WORK_DIR/line-metrics.json"
-          printf 'timing inputs: bind_wall=%q bind_rss=%q generate_wall=%q generate_rss=%q validate_wall=%q validate_rss=%q plan_wall=%q plan_rss=%q match_wall=%q match_rss=%q normal_wall=%q normal_rss=%q unknown_wall=%q unknown_rss=%q refuted_wall=%q refuted_rss=%q replay_wall=%q replay_rss=%q\n' \
-            "$(cat "$WORK_DIR/bind-wall-ms")" "$(cat "$WORK_DIR/bind-rss-kib")" \
-            "$(cat "$WORK_DIR/generate-wall-ms")" "$(cat "$WORK_DIR/generate-rss-kib")" \
-            "$(cat "$WORK_DIR/validate-wall-ms")" "$(cat "$WORK_DIR/validate-rss-kib")" \
-            "$(cat "$WORK_DIR/plan-wall-ms")" "$(cat "$WORK_DIR/plan-rss-kib")" \
-            "$(cat "$WORK_DIR/match-wall-ms")" "$(cat "$WORK_DIR/match-rss-kib")" \
-            "$(cat "$WORK_DIR/normal-wall-ms")" "$(cat "$WORK_DIR/normal-rss-kib")" \
-            "$(cat "$WORK_DIR/unknown-wall-ms")" "$(cat "$WORK_DIR/unknown-rss-kib")" \
-            "$(cat "$WORK_DIR/refuted-wall-ms")" "$(cat "$WORK_DIR/refuted-rss-kib")" \
-            "$(cat "$WORK_DIR/replay-wall-ms")" "$(cat "$WORK_DIR/replay-rss-kib")"
           jq -S -n \
             --argjson bind_wall "$(cat "$WORK_DIR/bind-wall-ms")" --argjson bind_rss "$(cat "$WORK_DIR/bind-rss-kib")" \
             --argjson generate_wall "$(cat "$WORK_DIR/generate-wall-ms")" --argjson generate_rss "$(cat "$WORK_DIR/generate-rss-kib")" \
@@ -431,10 +413,14 @@ jobs:
             echo "## Gooo OpenTofu Bridge"
             echo
             echo "- normal / UNKNOWN / REFUTED: 1 / 1 / 1"
-            echo "- generated files: $(jq -r '.generated_outputs.file_count' "$observation")"
+            echo "- generated files / bytes: $(jq -r '.generated_outputs.file_count' "$observation") / $(jq -r '.generated_outputs.bytes' "$observation")"
             echo "- user path steps: $(jq -r '.user_path.step_count' "$observation")"
             echo "- official OpenTofu validation: $(jq -r '.validation.official_opentofu.state' "$observation")"
-            echo "- executed verification stages: $(jq -r '.metrics[]|select(.name==\"executed_verification_stages\")|.value' "$observation")"
-            echo "- reused verification stages: $(jq -r '.metrics[]|select(.name==\"reused_verification_stages\")|.value' "$observation")"
+            echo "- OpenTofu plan: $(jq -r '.plan_receipt.iac_engine + " " + .plan_receipt.engine_version + ", exit_code=" + (.plan_receipt.exit_code|tostring) + ", resource_actions=" + (.plan_match.resource_action_count|tostring)' "$observation")"
+            echo "- build wall_ms / peak_rss_kib: $(jq -r '.verification_stages[]|select(.stage==\"build\")|(.wall_ms|tostring) + " / " + (.peak_rss_kib|tostring)' "$observation")"
+            echo "- test wall_ms / peak_rss_kib / executed / reused / skipped: $(jq -r '.verification_stages[]|select(.stage==\"test\")|(.wall_ms|tostring) + " / " + (.peak_rss_kib|tostring) + " / " + (.executed_test_count|tostring) + " / " + (.reused_test_evidence_count|tostring) + " / " + (.skipped_test_count|tostring)' "$observation")"
+            echo "- conformance wall_ms / peak_rss_kib: $(jq -r '.verification_stages[]|select(.stage==\"conformance\")|(.wall_ms|tostring) + " / " + (.peak_rss_kib|tostring)' "$observation")"
+            echo "- repository_writes: $(jq -r '.metrics[]|select(.name==\"repository_writes\")|.value' "$observation")"
+            echo "- identity digests: source=$(jq -r '.identity.source_sha256' "$observation"), artifact=$(jq -r '.identity.artifact_sha256' "$observation"), plan_receipt=$(jq -r '.identity.plan_receipt_sha256' "$observation"), binary=$(jq -r '.identity.binary_sha256' "$observation")"
             echo "- artifact digest: ${{ steps.evidence.outputs.artifact-digest }}"
           } >> "$GITHUB_STEP_SUMMARY"
